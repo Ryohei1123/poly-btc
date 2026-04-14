@@ -31,7 +31,23 @@ SQL_SUM_TRADE_VOLUME = "SELECT COALESCE(SUM(COALESCE(notional_usdc, size)), 0) A
 SQL_COUNT_OPEN_ORDERS = "SELECT COUNT(*) AS cnt FROM trades WHERE status IN ('open','submitted')"
 SQL_LATEST_BALANCE = "SELECT balance FROM bot_stats ORDER BY ts DESC LIMIT 1"
 SQL_LATEST_BTC_PRICE = "SELECT price FROM btc_prices ORDER BY ts DESC LIMIT 1"
-SQL_RUNTIME_SUMMARY = "SELECT updated_at, running, kill_switch, paper_mode, btc_price FROM runtime_state WHERE id=1"
+SQL_RUNTIME_SUMMARY = """
+SELECT
+    updated_at,
+    running,
+    kill_switch,
+    paper_mode,
+    btc_price,
+    btc_source,
+    ws_connected,
+    ws_tick_age_sec,
+    cycle_latency_ms,
+    orders_placed_cycle,
+    cycle_latency_avg_ms,
+    orders_placed_avg
+FROM runtime_state
+WHERE id=1
+"""
 SQL_ACTIVE_MARKETS_LAST_HOUR = "SELECT COUNT(DISTINCT market_id) AS active_markets FROM quotes WHERE ts >= %s"
 SQL_DAILY_PNL = "SELECT COALESCE(SUM(pnl), 0) AS pnl FROM trades WHERE ts >= %s AND status='filled'"
 SQL_COUNT_WIN_TRADES = "SELECT COUNT(*) AS cnt FROM trades WHERE pnl > 0 AND status='filled'"
@@ -277,6 +293,13 @@ def summary():
         "total_volume":    round(total_volume, 2),
         "open_orders":     open_t,
         "btc_price":       float(runtime["btc_price"]) if runtime and runtime["btc_price"] else (btc_price or 0),
+        "btc_source":      str(runtime["btc_source"] or "ref") if runtime else "ref",
+        "ws_connected":    bool(runtime["ws_connected"]) if runtime else False,
+        "ws_tick_age_sec": (None if not runtime or runtime["ws_tick_age_sec"] is None else float(runtime["ws_tick_age_sec"])),
+        "cycle_latency_ms": float(runtime["cycle_latency_ms"] or 0.0) if runtime else 0.0,
+        "orders_placed_cycle": int(runtime["orders_placed_cycle"] or 0) if runtime else 0,
+        "cycle_latency_avg_ms": float(runtime["cycle_latency_avg_ms"] or 0.0) if runtime else 0.0,
+        "orders_placed_avg": float(runtime["orders_placed_avg"] or 0.0) if runtime else 0.0,
         "active_markets":  markets_active,
         "daily_pnl":       round(daily_pnl, 2),
         "win_rate":        win_rate,
@@ -291,7 +314,7 @@ def summary():
 def status():
     con = get_db()
     row = con.execute(
-        "SELECT updated_at, running, kill_switch, paper_mode, btc_price, btc_source, ws_connected, ws_tick_age_sec, cycle_latency_ms, orders_placed_cycle, last_cycle, errors FROM runtime_state WHERE id=1"
+        "SELECT updated_at, running, kill_switch, paper_mode, btc_price, btc_source, ws_connected, ws_tick_age_sec, cycle_latency_ms, orders_placed_cycle, cycle_latency_avg_ms, orders_placed_avg, last_cycle, errors FROM runtime_state WHERE id=1"
     ).fetchone()
     if not row:
         return jsonify({
@@ -305,6 +328,8 @@ def status():
             "ws_tick_age_sec": None,
             "cycle_latency_ms": 0.0,
             "orders_placed_cycle": 0,
+            "cycle_latency_avg_ms": 0.0,
+            "orders_placed_avg": 0.0,
             "last_cycle": "",
             "errors": 0,
             "updated_at": None,
@@ -330,6 +355,8 @@ def status():
         "ws_tick_age_sec": (None if row["ws_tick_age_sec"] is None else float(row["ws_tick_age_sec"])),
         "cycle_latency_ms": float(row["cycle_latency_ms"] or 0.0),
         "orders_placed_cycle": int(row["orders_placed_cycle"] or 0),
+        "cycle_latency_avg_ms": float(row["cycle_latency_avg_ms"] or 0.0),
+        "orders_placed_avg": float(row["orders_placed_avg"] or 0.0),
         "last_cycle": row["last_cycle"] or "",
         "errors": int(row["errors"] or 0),
         "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else updated_at,

@@ -39,6 +39,8 @@ SCHEMA_STATEMENTS = [
         ws_tick_age_sec REAL DEFAULT 0,
         cycle_latency_ms REAL DEFAULT 0,
         orders_placed_cycle INTEGER DEFAULT 0,
+        cycle_latency_avg_ms REAL DEFAULT 0,
+        orders_placed_avg REAL DEFAULT 0,
         last_cycle TEXT DEFAULT '',
         errors INTEGER DEFAULT 0
     )""",
@@ -47,6 +49,8 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS ws_tick_age_sec REAL DEFAULT 0",
     "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS cycle_latency_ms REAL DEFAULT 0",
     "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS orders_placed_cycle INTEGER DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS cycle_latency_avg_ms REAL DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS orders_placed_avg REAL DEFAULT 0",
 ]
 
 

@@ -2,7 +2,7 @@
 Polymarket Market Making Bot
 ============================
 Strategy: BTC-linked binary prediction markets
-- Reads BTC price from Binance
+- Reads BTC price from Binance websocket with multi-exchange reference fallback
 - Calculates fair probability from price/strike
 - Compares vs Polymarket CLOB midpoint
 - Places two-sided quotes when edge >= threshold
@@ -176,8 +176,8 @@ SQL_UPSERT_BOT_STATS = """INSERT INTO bot_stats
                active_markets = EXCLUDED.active_markets"""
 SQL_DAILY_PNL = "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='filled' AND ts > (NOW() - INTERVAL '1 day')"
 SQL_UPSERT_RUNTIME_STATE = """INSERT INTO runtime_state
-           (id,updated_at,running,kill_switch,paper_mode,btc_price,btc_source,ws_connected,ws_tick_age_sec,cycle_latency_ms,orders_placed_cycle,last_cycle,errors)
-           VALUES (1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           (id,updated_at,running,kill_switch,paper_mode,btc_price,btc_source,ws_connected,ws_tick_age_sec,cycle_latency_ms,orders_placed_cycle,cycle_latency_avg_ms,orders_placed_avg,last_cycle,errors)
+           VALUES (1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
            ON CONFLICT (id) DO UPDATE
            SET updated_at = EXCLUDED.updated_at,
                running = EXCLUDED.running,
@@ -189,6 +189,8 @@ SQL_UPSERT_RUNTIME_STATE = """INSERT INTO runtime_state
                ws_tick_age_sec = EXCLUDED.ws_tick_age_sec,
                cycle_latency_ms = EXCLUDED.cycle_latency_ms,
                orders_placed_cycle = EXCLUDED.orders_placed_cycle,
+               cycle_latency_avg_ms = EXCLUDED.cycle_latency_avg_ms,
+               orders_placed_avg = EXCLUDED.orders_placed_avg,
                last_cycle = EXCLUDED.last_cycle,
                errors = EXCLUDED.errors"""
 
@@ -249,6 +251,10 @@ class BotState:
     reference_last_update: float = 0.0
     cycle_latency_ms: float = 0.0
     orders_placed_cycle: int = 0
+    cycle_latency_avg_ms: float = 0.0
+    orders_placed_avg: float = 0.0
+    cycle_latency_window: list[float] = field(default_factory=list)
+    orders_placed_window: list[int] = field(default_factory=list)
 
 state = BotState()
 
@@ -316,6 +322,27 @@ def refresh_account_state():
         state.current_balance = round(state.starting_balance + state.realized_pnl, 4)
         # For now, equity mirrors realized balance until mark-to-market is added.
         state.equity = state.current_balance
+
+def update_cycle_telemetry(orders_placed: int, cycle_started: float) -> None:
+    """Track instantaneous and 10-cycle average telemetry."""
+    state.orders_placed_cycle = int(orders_placed)
+    state.cycle_latency_ms = round((time.perf_counter() - cycle_started) * 1000.0, 2)
+
+    state.orders_placed_window.append(state.orders_placed_cycle)
+    state.cycle_latency_window.append(state.cycle_latency_ms)
+    if len(state.orders_placed_window) > 10:
+        state.orders_placed_window.pop(0)
+    if len(state.cycle_latency_window) > 10:
+        state.cycle_latency_window.pop(0)
+
+    state.orders_placed_avg = round(
+        sum(state.orders_placed_window) / max(1, len(state.orders_placed_window)),
+        2,
+    )
+    state.cycle_latency_avg_ms = round(
+        sum(state.cycle_latency_window) / max(1, len(state.cycle_latency_window)),
+        2,
+    )
 
 # ─── Market Data ──────────────────────────────────────────────────────────────
 
@@ -1047,10 +1074,12 @@ async def main_loop():
                             f"equity=${state.equity:.2f} realized={state.realized_pnl:+.2f} exposure=${get_total_exposure():.2f}"
                         )
 
-                state.orders_placed_cycle = placed_count
-                state.cycle_latency_ms = round((time.perf_counter() - cycle_started) * 1000.0, 2)
+                update_cycle_telemetry(placed_count, cycle_started)
                 log.info(
-                    f"Cycle telemetry: orders={state.orders_placed_cycle} latency_ms={state.cycle_latency_ms:.2f}"
+                    f"Cycle telemetry: orders={state.orders_placed_cycle} "
+                    f"orders_avg10={state.orders_placed_avg:.2f} "
+                    f"latency_ms={state.cycle_latency_ms:.2f} "
+                    f"latency_avg10_ms={state.cycle_latency_avg_ms:.2f}"
                 )
 
                 # 5. Update stats
@@ -1097,6 +1126,8 @@ def update_runtime_state():
             float(round(ws_age, 3)),
             float(state.cycle_latency_ms),
             int(state.orders_placed_cycle),
+            float(state.cycle_latency_avg_ms),
+            float(state.orders_placed_avg),
             state.last_cycle,
             len(state.errors),
         ),

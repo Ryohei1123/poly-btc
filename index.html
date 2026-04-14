@@ -540,6 +540,8 @@
 let pnlChart, btcChart, hourlyChart;
 let autoRefreshOn = true;
 let autoTimer;
+let prevOrdersPlaced = null;
+let prevLatencyMs = null;
 const el = id => document.getElementById(id);
 
 const CHART_DEFAULTS = {
@@ -687,6 +689,13 @@ function fmtNum(v, maxFractionDigits = 0) {
   return Number(v || 0).toLocaleString('en', { maximumFractionDigits: maxFractionDigits });
 }
 
+function trendMarker(current, previous, preferLower = false) {
+  if (previous === null || !Number.isFinite(previous)) return '=';
+  if (Math.abs(current - previous) < 0.0001) return '=';
+  const improving = preferLower ? (current < previous) : (current > previous);
+  return improving ? '+' : '-';
+}
+
 async function loadStatus() {
   const d = await fetchJSON('/api/status');
   const statusText = el('status-text');
@@ -720,7 +729,13 @@ async function loadStatus() {
 
   const ordersPlaced = Number(d.orders_placed_cycle || 0);
   const latencyMs = Number(d.cycle_latency_ms || 0);
-  opsText.textContent = `ORD ${ordersPlaced} | LAT ${latencyMs.toFixed(0)}ms`;
+  const ordersAvg = Number(d.orders_placed_avg || 0);
+  const latencyAvgMs = Number(d.cycle_latency_avg_ms || 0);
+  const ordersTrend = trendMarker(ordersPlaced, prevOrdersPlaced, false);
+  const latencyTrend = trendMarker(latencyMs, prevLatencyMs, true);
+  opsText.textContent = `ORD ${ordersPlaced}/${ordersAvg.toFixed(1)}${ordersTrend} | LAT ${latencyMs.toFixed(0)}/${latencyAvgMs.toFixed(0)}ms${latencyTrend}`;
+  prevOrdersPlaced = ordersPlaced;
+  prevLatencyMs = latencyMs;
 }
 
 async function loadSummary() {
