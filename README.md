@@ -169,4 +169,4 @@ Open `http://localhost:5050` after running `server.py`:
 - **Win rate ring** — live win/loss ratio
 - **Live log** — tailed bot log output
 - **Quote monitor** — last 30 quotes with edge stats
-- **Header telemetry** — bot status, websocket health, per-cycle and 10-cycle average orders/latency with simple trend markers (`+` improving/increasing, `-` worsening/decreasing, `=` unchanged)
+- **Header telemetry** — bot status, websocket health, per-cycle and 10-cycle average orders/latency with simple trend markers (`+` improving/increasing, `-` worsening/decreasing, `=` unchanged) and inline legend (hover, click/tap, keyboard accessible, viewport-aware tooltip placement)
