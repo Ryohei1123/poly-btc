@@ -349,7 +349,7 @@
     <button class="btn btn-gray" onclick="toggleAutoRefresh()">⏱ Auto-refresh: <span id="auto-label">ON</span></button>
     <button class="btn btn-red" onclick="alert('Kill switch would cancel all open orders and halt the bot.')">🛑 Kill Switch</button>
     <div style="margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--text3);display:flex;align-items:center;gap:6px;">
-      Mode: <span style="color:var(--yellow);font-weight:600">PAPER TRADING</span>
+      Mode: <span style="color:var(--yellow);font-weight:600" id="mode-label">PAPER TRADING</span>
       &nbsp;|&nbsp; Set POLY_PRIVATE_KEY for live trading
     </div>
   </div>
@@ -642,23 +642,65 @@ function truncate(s, n) {
   return s && s.length > n ? s.slice(0,n)+'…' : (s||'');
 }
 
+async function loadStatus() {
+  const d = await fetchJSON('/api/status');
+  const statusText = document.getElementById('status-text');
+  const statusPill = document.getElementById('status-pill');
+  const modeLabel = document.getElementById('mode-label');
+  const dot = statusPill.querySelector('.dot');
+
+  modeLabel.textContent = d.paper_mode ? 'PAPER TRADING' : 'LIVE TRADING';
+  modeLabel.style.color = d.paper_mode ? 'var(--yellow)' : 'var(--green)';
+
+  if (!d.running || !d.healthy) {
+    statusText.textContent = 'IDLE';
+    statusPill.style.borderColor = 'rgba(247,195,85,0.25)';
+    statusPill.style.background = 'rgba(247,195,85,0.08)';
+    statusPill.style.color = 'var(--yellow)';
+    dot.style.background = 'var(--yellow)';
+  } else if (d.kill_switch) {
+    statusText.textContent = 'KILL';
+    statusPill.style.borderColor = 'rgba(255,77,106,0.25)';
+    statusPill.style.background = 'rgba(255,77,106,0.08)';
+    statusPill.style.color = 'var(--red)';
+    dot.style.background = 'var(--red)';
+  } else {
+    statusText.textContent = 'LIVE';
+    statusPill.style.borderColor = 'rgba(0,229,160,0.25)';
+    statusPill.style.background = 'rgba(0,229,160,0.08)';
+    statusPill.style.color = 'var(--green)';
+    dot.style.background = 'var(--green)';
+  }
+}
+
 async function loadSummary() {
   const d = await fetchJSON('/api/summary');
-  document.getElementById('stat-pnl').textContent = fmtPnl(d.realized_pnl);
-  document.getElementById('stat-pnl').style.color = d.realized_pnl >= 0 ? 'var(--green)' : 'var(--red)';
-  document.getElementById('stat-pnl-sub').textContent = `Daily: ${fmtPnl(d.daily_pnl)}`;
-  document.getElementById('stat-trades').textContent = d.total_trades.toLocaleString();
-  document.getElementById('stat-trades-sub').textContent = `${d.open_orders} open orders`;
-  document.getElementById('stat-daily').textContent = fmtPnl(d.daily_pnl);
-  document.getElementById('stat-daily').style.color = d.daily_pnl >= 0 ? 'var(--green)' : 'var(--red)';
-  document.getElementById('stat-wr').textContent = d.win_rate + '%';
-  document.getElementById('stat-wr-sub').textContent = `${d.active_markets} active markets`;
-  document.getElementById('btc-badge').textContent = 'BTC $' + d.btc_price.toLocaleString('en',{maximumFractionDigits:0});
-  document.getElementById('btc-badge2').textContent = '$' + d.btc_price.toLocaleString('en',{maximumFractionDigits:0});
-  document.getElementById('trades-badge').textContent = d.total_trades + ' total';
+  const realizedPnl = Number(d.realized_pnl || 0);
+  const dailyPnl = Number(d.daily_pnl || 0);
+  const winRate = Number(d.win_rate || 0);
+  const btcPrice = Number(d.btc_price || 0);
+  const totalTrades = Number(d.total_trades || 0);
+  const openOrders = Number(d.open_orders || 0);
+  const activeMarkets = Number(d.active_markets || 0);
+  const equity = Number(d.equity || 0);
+  const roiPct = Number(d.roi_pct || 0);
+  const startingBalance = Number(d.starting_balance || 0);
+
+  document.getElementById('stat-pnl').textContent = fmtPnl(realizedPnl);
+  document.getElementById('stat-pnl').style.color = realizedPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('stat-pnl-sub').textContent = `Equity: $${equity.toLocaleString('en', {maximumFractionDigits:2})} | ROI: ${roiPct.toFixed(2)}%`;
+  document.getElementById('stat-trades').textContent = totalTrades.toLocaleString();
+  document.getElementById('stat-trades-sub').textContent = `${openOrders} open orders | Start: $${startingBalance.toFixed(0)}`;
+  document.getElementById('stat-daily').textContent = fmtPnl(dailyPnl);
+  document.getElementById('stat-daily').style.color = dailyPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('stat-wr').textContent = winRate + '%';
+  document.getElementById('stat-wr-sub').textContent = `${activeMarkets} active markets`;
+  document.getElementById('btc-badge').textContent = 'BTC $' + btcPrice.toLocaleString('en',{maximumFractionDigits:0});
+  document.getElementById('btc-badge2').textContent = '$' + btcPrice.toLocaleString('en',{maximumFractionDigits:0});
+  document.getElementById('trades-badge').textContent = totalTrades + ' total';
 
   // Ring
-  const pct = d.win_rate;
+  const pct = winRate;
   document.getElementById('ring-pct').textContent = pct + '%';
   const circ = 2 * Math.PI * 36;
   document.getElementById('ring-circle').setAttribute('stroke-dashoffset', circ * (1 - pct/100));
@@ -666,6 +708,11 @@ async function loadSummary() {
 
 async function loadPnlCurve() {
   const data = await fetchJSON('/api/pnl_curve');
+  if (!data.length) {
+    if (pnlChart) updateChart(pnlChart, [], []);
+    document.getElementById('pnl-badge').textContent = '$0';
+    return;
+  }
   const labels = data.map(d => d.ts.slice(5,16));
   const values = data.map(d => d.pnl);
   if (!pnlChart) initPnlChart(labels, values);
@@ -685,6 +732,10 @@ async function loadBtc() {
 async function loadTrades() {
   const data = await fetchJSON('/api/trades/recent');
   const tbody = document.getElementById('trades-body');
+  if (!data.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">No trades yet</td></tr>';
+    return;
+  }
   tbody.innerHTML = data.map(t => `
     <tr>
       <td>${fmtTime(t.ts)}</td>
@@ -699,7 +750,11 @@ async function loadTrades() {
 
 async function loadMarkets() {
   const data = await fetchJSON('/api/trades/markets');
-  if (!data.length) return;
+  if (!data.length) {
+    document.getElementById('markets-breakdown').innerHTML =
+      '<div style="color:var(--text3);font-family:var(--mono);font-size:11px">No filled trades yet</div>';
+    return;
+  }
   const maxPnl = Math.max(...data.map(d => Math.abs(+d.total_pnl)));
   document.getElementById('markets-breakdown').innerHTML = data.slice(0,6).map(m => `
     <div class="market-item">
@@ -751,7 +806,7 @@ async function loadLogs() {
   } catch(e) {
     // Log file not found yet — show placeholder
     document.getElementById('log-output').innerHTML =
-      '<div class="log-line info">Bot not started yet. Run: python bot/market_maker.py</div>';
+      '<div class="log-line info">Bot not started yet. Run: python market_maker.py</div>';
   }
 }
 
@@ -759,6 +814,7 @@ async function loadLogs() {
 async function refreshAll() {
   document.getElementById('last-update').textContent = 'Refreshing…';
   await Promise.all([
+    loadStatus(),
     loadSummary(),
     loadPnlCurve(),
     loadBtc(),

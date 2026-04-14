@@ -1,19 +1,22 @@
 """
 Polymarket Bot Dashboard — Backend API
 Serves real-time stats from the SQLite database.
-Run: python dashboard/server.py
+Run: python server.py
 Access: http://localhost:5050
 """
 
-import json
 import sqlite3
 import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from flask import Flask, jsonify, send_from_directory
+from dotenv import load_dotenv
 
-DB_PATH = str(Path(__file__).parent.parent / "data" / "bot.db")
-STATIC_DIR = str(Path(__file__).parent / "static")
+load_dotenv()
+
+DB_PATH = str(Path(__file__).parent / "data" / "bot.db")
+DEFAULT_STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR = str(DEFAULT_STATIC_DIR if DEFAULT_STATIC_DIR.exists() else Path(__file__).parent)
 
 app = Flask(__name__, static_folder=STATIC_DIR)
 
@@ -23,7 +26,7 @@ def get_db():
     return con
 
 def ensure_db():
-    """Create DB with sample data if it doesn't exist yet."""
+    """Create DB schema. Demo data is optional via POLYBOT_SEED_DEMO=1."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.execute("""CREATE TABLE IF NOT EXISTS trades (
@@ -42,9 +45,20 @@ def ensure_db():
         unrealized_pnl REAL DEFAULT 0, daily_pnl REAL DEFAULT 0,
         balance REAL DEFAULT 0, active_markets INTEGER DEFAULT 0
     )""")
-    # Seed demo data if empty
+    con.execute("""CREATE TABLE IF NOT EXISTS runtime_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        updated_at TEXT NOT NULL,
+        running INTEGER DEFAULT 1,
+        kill_switch INTEGER DEFAULT 0,
+        paper_mode INTEGER DEFAULT 1,
+        btc_price REAL DEFAULT 0,
+        last_cycle TEXT DEFAULT '',
+        errors INTEGER DEFAULT 0
+    )""")
+
+    # Seed demo data only when explicitly requested.
     count = con.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
-    if count == 0:
+    if count == 0 and os.getenv("POLYBOT_SEED_DEMO", "0") == "1":
         _seed_demo_data(con)
     con.commit()
     return con
@@ -112,26 +126,89 @@ def _seed_demo_data(con):
 @app.route("/api/summary")
 def summary():
     con = get_db()
-    trades = con.execute("SELECT COUNT(*), SUM(pnl), SUM(size) FROM trades WHERE status='filled'").fetchone()
-    open_t = con.execute("SELECT COUNT(*) FROM trades WHERE status='open'").fetchone()[0]
+    paper_initial_balance = float(os.getenv("POLY_PAPER_INITIAL_BALANCE", "500"))
+    total_trades = con.execute("SELECT COUNT(*) FROM trades").fetchone()[0] or 0
+    realized_pnl = con.execute("SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='filled'").fetchone()[0] or 0
+    total_volume = con.execute("SELECT COALESCE(SUM(size), 0) FROM trades").fetchone()[0] or 0
+    open_t = con.execute("SELECT COUNT(*) FROM trades WHERE status='open'").fetchone()[0] or 0
+    last_balance_row = con.execute(
+        "SELECT balance FROM bot_stats ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+    equity = float(last_balance_row["balance"]) if last_balance_row and last_balance_row["balance"] is not None else (paper_initial_balance + realized_pnl)
+    roi_pct = ((equity - paper_initial_balance) / paper_initial_balance * 100.0) if paper_initial_balance > 0 else 0.0
+
     btc = con.execute("SELECT price FROM btc_prices ORDER BY ts DESC LIMIT 1").fetchone()
-    markets_active = con.execute("SELECT COUNT(DISTINCT market_id) FROM quotes WHERE ts > datetime('now','-1 hour')").fetchone()[0]
-    daily_pnl = con.execute(
-        "SELECT SUM(pnl) FROM trades WHERE ts > datetime('now','-1 day') AND status='filled'"
+    runtime = con.execute(
+        "SELECT updated_at, running, kill_switch, paper_mode, btc_price FROM runtime_state WHERE id=1"
+    ).fetchone()
+
+    one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    markets_active = con.execute(
+        "SELECT COUNT(DISTINCT market_id) FROM quotes WHERE ts >= ?",
+        (one_hour_ago,)
     ).fetchone()[0] or 0
-    win_trades = con.execute("SELECT COUNT(*) FROM trades WHERE pnl > 0 AND status='filled'").fetchone()[0]
-    total_filled = trades[0] or 1
+
+    one_day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    daily_pnl = con.execute(
+        "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE ts >= ? AND status='filled'",
+        (one_day_ago,)
+    ).fetchone()[0] or 0
+    win_trades = con.execute("SELECT COUNT(*) FROM trades WHERE pnl > 0 AND status='filled'").fetchone()[0] or 0
+    total_filled = con.execute("SELECT COUNT(*) FROM trades WHERE status='filled'").fetchone()[0] or 0
+    win_rate = round((win_trades / total_filled * 100), 1) if total_filled > 0 else 0.0
 
     return jsonify({
-        "total_trades":    trades[0] or 0,
-        "realized_pnl":    round(trades[1] or 0, 2),
-        "total_volume":    round(trades[2] or 0, 2),
+        "total_trades":    total_trades,
+        "realized_pnl":    round(realized_pnl, 2),
+        "total_volume":    round(total_volume, 2),
         "open_orders":     open_t,
-        "btc_price":       btc[0] if btc else 0,
+        "btc_price":       float(runtime["btc_price"]) if runtime and runtime["btc_price"] else (btc[0] if btc else 0),
         "active_markets":  markets_active,
         "daily_pnl":       round(daily_pnl, 2),
-        "win_rate":        round(win_trades / total_filled * 100, 1),
-        "kill_switch":     False,
+        "win_rate":        win_rate,
+        "kill_switch":     bool(runtime["kill_switch"]) if runtime else False,
+        "paper_mode":      bool(runtime["paper_mode"]) if runtime else True,
+        "starting_balance": round(paper_initial_balance, 2),
+        "equity":          round(equity, 2),
+        "roi_pct":         round(roi_pct, 2),
+    })
+
+@app.route("/api/status")
+def status():
+    con = get_db()
+    row = con.execute(
+        "SELECT updated_at, running, kill_switch, paper_mode, btc_price, last_cycle, errors FROM runtime_state WHERE id=1"
+    ).fetchone()
+    if not row:
+        return jsonify({
+            "running": False,
+            "healthy": False,
+            "kill_switch": False,
+            "paper_mode": True,
+            "btc_price": 0.0,
+            "last_cycle": "",
+            "errors": 0,
+            "updated_at": None,
+        })
+
+    updated_at = row["updated_at"]
+    healthy = False
+    if updated_at:
+        try:
+            ts = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            healthy = (datetime.now(timezone.utc) - ts).total_seconds() <= 120
+        except Exception:
+            healthy = False
+
+    return jsonify({
+        "running": bool(row["running"]),
+        "healthy": healthy,
+        "kill_switch": bool(row["kill_switch"]),
+        "paper_mode": bool(row["paper_mode"]),
+        "btc_price": float(row["btc_price"] or 0),
+        "last_cycle": row["last_cycle"] or "",
+        "errors": int(row["errors"] or 0),
+        "updated_at": updated_at,
     })
 
 @app.route("/api/pnl_curve")
@@ -141,6 +218,19 @@ def pnl_curve():
         """SELECT ts, realized_pnl FROM bot_stats
            ORDER BY ts DESC LIMIT 720"""
     ).fetchall()
+    if not rows:
+        trades = con.execute(
+            """SELECT ts, pnl FROM trades
+               WHERE status='filled'
+               ORDER BY ts ASC LIMIT 5000"""
+        ).fetchall()
+        acc = 0.0
+        points = []
+        for t in trades:
+            acc += float(t["pnl"] or 0)
+            points.append({"ts": t["ts"][:16], "pnl": round(acc, 4)})
+        return jsonify(points)
+
     rows = list(reversed(rows))
     return jsonify([{"ts": r["ts"][:16], "pnl": r["realized_pnl"]} for r in rows])
 
@@ -149,7 +239,7 @@ def recent_trades():
     con = get_db()
     rows = con.execute(
         """SELECT ts, market_q, side, price, size, pnl, status
-           FROM trades ORDER BY ts DESC LIMIT 50"""
+           FROM trades ORDER BY ts DESC LIMIT 75"""
     ).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -157,7 +247,7 @@ def recent_trades():
 def market_breakdown():
     con = get_db()
     rows = con.execute(
-        """SELECT market_q, COUNT(*) as cnt, SUM(pnl) as total_pnl,
+        """SELECT market_q, COUNT(*) as cnt, COALESCE(SUM(pnl), 0) as total_pnl,
                   AVG(price) as avg_price, SUM(size) as volume
            FROM trades WHERE status='filled'
            GROUP BY market_q ORDER BY total_pnl DESC"""
@@ -187,7 +277,7 @@ def hourly_pnl():
     con = get_db()
     rows = con.execute(
         """SELECT strftime('%Y-%m-%d %H:00', ts) as hour,
-                  COUNT(*) as trades, SUM(pnl) as pnl
+                  COUNT(*) as trades, COALESCE(SUM(pnl), 0) as pnl
            FROM trades WHERE status='filled'
            GROUP BY hour ORDER BY hour DESC LIMIT 48"""
     ).fetchall()
@@ -195,12 +285,12 @@ def hourly_pnl():
 
 @app.route("/api/logs")
 def get_logs():
-    log_dir = Path(__file__).parent.parent / "logs"
+    log_dir = Path(__file__).parent / "logs"
     today = datetime.now().strftime("%Y%m%d")
     log_file = log_dir / f"bot_{today}.log"
     lines = []
     if log_file.exists():
-        with open(log_file) as f:
+        with open(log_file, encoding="utf-8") as f:
             lines = f.readlines()[-60:]
     return jsonify({"lines": [l.rstrip() for l in lines]})
 
@@ -213,7 +303,16 @@ def serve(path):
 
 if __name__ == "__main__":
     ensure_db()
+    host = os.getenv("POLY_DASHBOARD_HOST", "0.0.0.0")
+    port = int(os.getenv("POLY_DASHBOARD_PORT", "5050"))
     print("\n  🤖  Polymarket Bot Dashboard")
     print("  ─────────────────────────────")
-    print("  http://localhost:5050\n")
-    app.run(host="0.0.0.0", port=5050, debug=False)
+    print(f"  http://localhost:{port}\n")
+    try:
+        from waitress import serve as waitress_serve
+        print(f"  Serving with Waitress on {host}:{port}")
+        waitress_serve(app, host=host, port=port)
+    except Exception:
+        # Fallback for local development if waitress is unavailable.
+        print("  Waitress not available, falling back to Flask dev server")
+        app.run(host=host, port=port, debug=False)

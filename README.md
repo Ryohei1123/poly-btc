@@ -22,12 +22,16 @@ pip install -r requirements.txt
 ### 2. Run in paper trading mode (no keys needed)
 ```bash
 # Terminal 1 — start the bot
-python bot/market_maker.py
+python market_maker.py
 
 # Terminal 2 — start the dashboard
-python dashboard/server.py
+python server.py
 # Open http://localhost:5050
 ```
+
+Paper mode defaults:
+- `POLY_FORCE_PAPER=1` (enabled by default)
+- `POLY_PAPER_INITIAL_BALANCE=500` (starting paper equity)
 
 ### 3. Configure for live trading
 Create a `.env` file:
@@ -74,13 +78,10 @@ The spread capture comes from:
 ## Files
 
 ```
-polybot/
-├── bot/
-│   └── market_maker.py     ← Main trading bot
-├── dashboard/
-│   ├── server.py           ← Flask API server
-│   └── static/
-│       └── index.html      ← Dashboard UI
+poly-btc/
+├── market_maker.py         ← Main trading bot
+├── server.py               ← Flask API server
+├── index.html              ← Dashboard UI
 ├── data/
 │   └── bot.db              ← SQLite (auto-created)
 ├── logs/
@@ -92,7 +93,7 @@ polybot/
 
 ## Config Tuning
 
-Edit `bot/market_maker.py` → `Config` class:
+Edit `market_maker.py` → `Config` class:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -102,6 +103,30 @@ Edit `bot/market_maker.py` → `Config` class:
 | `MAX_POSITION` | $500 | Max per market |
 | `QUOTE_REFRESH_SEC` | 30 | Cycle interval |
 | `MAX_DAILY_LOSS` | $200 | Kill switch threshold |
+
+Runtime env vars:
+- `POLY_FORCE_PAPER=1` keeps bot in paper mode even if keys exist
+- `POLY_PAPER_INITIAL_BALANCE=500` sets paper account starting balance
+
+## Run 24/7 (Linux)
+
+Use `tmux` so bot and dashboard stay alive after you disconnect:
+
+```bash
+sudo apt-get update && sudo apt-get install -y tmux
+cd /root/works/poly-btc
+pip install -r requirements.txt
+
+# Bot session
+tmux new -d -s polybot 'export POLY_FORCE_PAPER=1 POLY_PAPER_INITIAL_BALANCE=500; python market_maker.py'
+
+# Dashboard session
+tmux new -d -s polydash 'python server.py'
+
+# Check logs / status
+tmux ls
+tmux attach -t polybot
+```
 
 ---
 

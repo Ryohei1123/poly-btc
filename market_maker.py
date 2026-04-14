@@ -15,6 +15,7 @@ import logging
 import os
 import time
 import math
+import random
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, field
 from typing import Optional
@@ -23,6 +24,21 @@ import sqlite3
 from pathlib import Path
 
 # ─── Configuration ────────────────────────────────────────────────────────────
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+def env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 @dataclass
 class Config:
@@ -38,6 +54,9 @@ class Config:
     MAX_POSITION: float = 500.0    # Max USDC in any single market
     QUOTE_REFRESH_SEC: int = 30    # How often to refresh quotes
     MARKETS_WATCHED: int = 10      # How many BTC markets to watch
+    PAPER_FILL_BASE: float = 0.20  # Base fill probability in paper mode
+    PAPER_INITIAL_BALANCE: float = field(default_factory=lambda: env_float("POLY_PAPER_INITIAL_BALANCE", 500.0))  # Paper account starting balance (USDC)
+    FORCE_PAPER: bool = field(default_factory=lambda: env_bool("POLY_FORCE_PAPER", True))
 
     # Risk
     MAX_DAILY_LOSS: float = 200.0  # Kill switch: stop if daily PnL < -$200
@@ -50,13 +69,13 @@ class Config:
     API_PASSPHRASE: str = field(default_factory=lambda: os.getenv("POLY_PASSPHRASE", ""))
 
     # DB path
-    DB_PATH: str = str(Path(__file__).parent.parent / "data" / "bot.db")
+    DB_PATH: str = str(Path(__file__).parent / "data" / "bot.db")
 
 config = Config()
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
-log_dir = Path(__file__).parent.parent / "logs"
+log_dir = Path(__file__).parent / "logs"
 log_dir.mkdir(exist_ok=True)
 
 logging.basicConfig(
@@ -120,6 +139,18 @@ def init_db(path: str):
             active_markets  INTEGER DEFAULT 0
         )
     """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS runtime_state (
+            id              INTEGER PRIMARY KEY CHECK (id = 1),
+            updated_at      TEXT NOT NULL,
+            running         INTEGER DEFAULT 1,
+            kill_switch     INTEGER DEFAULT 0,
+            paper_mode      INTEGER DEFAULT 1,
+            btc_price       REAL DEFAULT 0,
+            last_cycle      TEXT DEFAULT '',
+            errors          INTEGER DEFAULT 0
+        )
+    """)
     con.commit()
     return con
 
@@ -162,8 +193,28 @@ class BotState:
     last_cycle: str = ""
     kill_switch: bool = False
     errors: list = field(default_factory=list)
+    paper_mode: bool = True
+    starting_balance: float = config.PAPER_INITIAL_BALANCE
+    current_balance: float = config.PAPER_INITIAL_BALANCE
+    equity: float = config.PAPER_INITIAL_BALANCE
 
 state = BotState()
+
+def get_total_exposure() -> float:
+    """Approximate gross inventory notional in USDC."""
+    exposure = 0.0
+    for pos in state.open_positions.values():
+        qty = abs(float(pos.get("qty", 0.0)))
+        avg = max(0.01, float(pos.get("avg_price", 0.0)))
+        exposure += qty * avg
+    return round(exposure, 4)
+
+def refresh_account_state():
+    """Refresh balance/equity fields for paper-mode accounting."""
+    if state.paper_mode:
+        state.current_balance = round(state.starting_balance + state.realized_pnl, 4)
+        # For now, equity mirrors realized balance until mark-to-market is added.
+        state.equity = state.current_balance
 
 # ─── Market Data ──────────────────────────────────────────────────────────────
 
@@ -401,6 +452,8 @@ async def place_order(
     price: float,
     size: float,
     market: Market,
+    edge: float = 0.0,
+    mid: Optional[float] = None,
 ) -> Optional[str]:
     """
     Place a limit order via the CLOB API.
@@ -409,19 +462,97 @@ async def place_order(
 
     In PAPER TRADING mode (no keys set), this simulates order placement.
     """
-    paper_mode = not config.PRIVATE_KEY
+    paper_mode = config.FORCE_PAPER or not config.PRIVATE_KEY
+    state.paper_mode = paper_mode
 
     order_id = f"sim_{int(time.time()*1000)}_{side[:1]}"
 
+    def clamp(v: float, lo: float, hi: float) -> float:
+        return max(lo, min(hi, v))
+
+    def apply_fill_pnl(market_id: str, fill_side: str, fill_price: float, usdc_size: float) -> float:
+        """
+        Inventory accounting on YES shares:
+        shares = usdc_notional / price
+        realized PnL appears when reducing an existing long/short.
+        """
+        qty = usdc_size / max(fill_price, 0.01)
+        pos = state.open_positions.get(market_id, {"qty": 0.0, "avg_price": 0.0})
+        cur_qty = float(pos["qty"])
+        cur_avg = float(pos["avg_price"])
+        realized = 0.0
+
+        if fill_side == "BUY":
+            if cur_qty >= 0:
+                new_qty = cur_qty + qty
+                new_avg = ((cur_avg * cur_qty) + (fill_price * qty)) / new_qty if new_qty else 0.0
+                pos["qty"], pos["avg_price"] = new_qty, new_avg
+            else:
+                close_qty = min(qty, abs(cur_qty))
+                realized += (cur_avg - fill_price) * close_qty
+                remaining_buy = qty - close_qty
+                new_qty = cur_qty + close_qty
+                if abs(new_qty) < 1e-9:
+                    if remaining_buy > 0:
+                        pos["qty"], pos["avg_price"] = remaining_buy, fill_price
+                    else:
+                        pos["qty"], pos["avg_price"] = 0.0, 0.0
+                else:
+                    pos["qty"] = new_qty
+                if remaining_buy > 0 and new_qty > 0:
+                    pos["qty"], pos["avg_price"] = remaining_buy, fill_price
+        else:  # SELL
+            if cur_qty <= 0:
+                short_qty = abs(cur_qty)
+                new_short = short_qty + qty
+                new_avg = ((cur_avg * short_qty) + (fill_price * qty)) / new_short if new_short else 0.0
+                pos["qty"], pos["avg_price"] = -new_short, new_avg
+            else:
+                close_qty = min(qty, cur_qty)
+                realized += (fill_price - cur_avg) * close_qty
+                remaining_sell = qty - close_qty
+                new_qty = cur_qty - close_qty
+                if abs(new_qty) < 1e-9:
+                    if remaining_sell > 0:
+                        pos["qty"], pos["avg_price"] = -remaining_sell, fill_price
+                    else:
+                        pos["qty"], pos["avg_price"] = 0.0, 0.0
+                else:
+                    pos["qty"] = new_qty
+                if remaining_sell > 0 and new_qty < 0:
+                    pos["qty"], pos["avg_price"] = -remaining_sell, fill_price
+
+        if abs(pos["qty"]) < 1e-9:
+            state.open_positions.pop(market_id, None)
+        else:
+            state.open_positions[market_id] = pos
+        return round(realized, 4)
+
     if paper_mode:
-        log.info(f"[PAPER] {side} {size:.1f} {market.question[:40]}... @ {price:.3f}")
+        ref_mid = mid if mid is not None else market.yes_price
+        dist = (ref_mid - price) if side == "BUY" else (price - ref_mid)
+        fill_prob = clamp(config.PAPER_FILL_BASE + (edge * 5.0) - (max(0.0, dist) * 1.8), 0.05, 0.90)
+        is_filled = random.random() < fill_prob
+
+        status = "filled" if is_filled else "cancelled"
+        fill_price = price if is_filled else None
+        trade_pnl = 0.0
+        if is_filled:
+            trade_pnl = apply_fill_pnl(market.condition_id, side, price, size)
+            state.realized_pnl += trade_pnl
+            refresh_account_state()
+
+        log.info(
+            f"[PAPER] {side} {size:.1f} {market.question[:40]}... @ {price:.3f} "
+            f"status={status} fill_prob={fill_prob:.2f} pnl={trade_pnl:+.2f}"
+        )
         state.total_trades += 1
         db.execute(
-            """INSERT INTO trades (ts,market_id,market_q,side,price,size,order_id,status)
-               VALUES (?,?,?,?,?,?,?,?)""",
+            """INSERT INTO trades (ts,market_id,market_q,side,price,size,order_id,status,pnl,fill_price)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (datetime.now(timezone.utc).isoformat(),
              market.condition_id, market.question,
-             side, price, size, order_id, "paper")
+             side, price, size, order_id, status, trade_pnl, fill_price)
         )
         db.commit()
         return order_id
@@ -485,16 +616,20 @@ def check_kill_switch():
 
 def update_stats():
     """Persist bot stats snapshot to DB."""
+    state.daily_pnl = compute_daily_pnl()
+    refresh_account_state()
     db.execute(
         """INSERT OR REPLACE INTO bot_stats
-           (ts,total_trades,open_positions,realized_pnl,daily_pnl,active_markets)
-           VALUES (?,?,?,?,?,?)""",
+           (ts,total_trades,open_positions,realized_pnl,unrealized_pnl,daily_pnl,balance,active_markets)
+           VALUES (?,?,?,?,?,?,?,?)""",
         (
             datetime.now(timezone.utc).isoformat(),
             state.total_trades,
             len(state.open_positions),
             state.realized_pnl,
+            0.0,
             state.daily_pnl,
+            state.equity,
             len(state.active_markets),
         )
     )
@@ -506,7 +641,13 @@ async def main_loop():
     log.info("=" * 60)
     log.info("  Polymarket Market Making Bot  |  Starting up...")
     log.info("=" * 60)
-    log.info(f"Config: spread={config.SPREAD_PCT*100:.1f}%  min_edge={config.MIN_EDGE*100:.1f}%  size=${config.ORDER_SIZE}")
+    state.paper_mode = config.FORCE_PAPER or not bool(config.PRIVATE_KEY)
+    state.starting_balance = config.PAPER_INITIAL_BALANCE
+    refresh_account_state()
+    log.info(
+        f"Config: spread={config.SPREAD_PCT*100:.1f}%  min_edge={config.MIN_EDGE*100:.1f}%  "
+        f"size=${config.ORDER_SIZE}  paper={state.paper_mode}  starting_balance=${state.starting_balance:.2f}"
+    )
 
     async with aiohttp.ClientSession() as session:
         cycle = 0
@@ -545,16 +686,48 @@ async def main_loop():
                         )
 
                         if quote.should_place:
+                            if state.paper_mode:
+                                exposure = get_total_exposure()
+                                projected = exposure + config.ORDER_SIZE
+                                if projected > state.equity:
+                                    log.warning(
+                                        f"Paper balance guard: projected exposure ${projected:.2f} > equity ${state.equity:.2f}. "
+                                        "Skipping new quote."
+                                    )
+                                    continue
                             # Place bid + ask
-                            await place_order(session, market.yes_token, "BUY",  quote.bid, config.ORDER_SIZE, market)
-                            await place_order(session, market.yes_token, "SELL", quote.ask, config.ORDER_SIZE, market)
+                            await place_order(
+                                session,
+                                market.yes_token,
+                                "BUY",
+                                quote.bid,
+                                config.ORDER_SIZE,
+                                market,
+                                edge=quote.edge,
+                                mid=quote.mid,
+                            )
+                            await place_order(
+                                session,
+                                market.yes_token,
+                                "SELL",
+                                quote.ask,
+                                config.ORDER_SIZE,
+                                market,
+                                edge=quote.edge,
+                                mid=quote.mid,
+                            )
                             placed_count += 1
                             await asyncio.sleep(0.3)  # Rate limit
 
                     log.info(f"Placed quotes on {placed_count} markets this cycle")
+                    log.info(
+                        f"Paper account: start=${state.starting_balance:.2f} "
+                        f"equity=${state.equity:.2f} realized={state.realized_pnl:+.2f} exposure=${get_total_exposure():.2f}"
+                    )
 
                 # 5. Update stats
                 update_stats()
+                update_runtime_state()
 
                 # 6. Wait for next cycle
                 log.info(f"Sleeping {config.QUOTE_REFRESH_SEC}s until next cycle...")
@@ -568,6 +741,29 @@ async def main_loop():
                 await asyncio.sleep(10)
 
     log.info("Bot stopped.")
+
+def compute_daily_pnl() -> float:
+    row = db.execute(
+        "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='filled' AND ts > datetime('now','-1 day')"
+    ).fetchone()
+    return float(row[0] or 0.0)
+
+def update_runtime_state():
+    db.execute(
+        """INSERT OR REPLACE INTO runtime_state
+           (id,updated_at,running,kill_switch,paper_mode,btc_price,last_cycle,errors)
+           VALUES (1,?,?,?,?,?,?,?)""",
+        (
+            datetime.now(timezone.utc).isoformat(),
+            int(state.running),
+            int(state.kill_switch),
+            int(state.paper_mode),
+            state.btc_price,
+            state.last_cycle,
+            len(state.errors),
+        ),
+    )
+    db.commit()
 
 if __name__ == "__main__":
     asyncio.run(main_loop())
