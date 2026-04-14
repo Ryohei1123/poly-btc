@@ -31,9 +31,12 @@ def ensure_db():
     con = sqlite3.connect(DB_PATH)
     con.execute("""CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, market_id TEXT,
-        market_q TEXT, side TEXT, price REAL, size REAL,
+        market_slug TEXT, market_q TEXT, side TEXT, price REAL, size REAL,
         order_id TEXT, status TEXT DEFAULT 'open', pnl REAL DEFAULT 0, fill_price REAL
     )""")
+    trade_cols = {r[1] for r in con.execute("PRAGMA table_info(trades)").fetchall()}
+    if "market_slug" not in trade_cols:
+        con.execute("ALTER TABLE trades ADD COLUMN market_slug TEXT")
     con.execute("""CREATE TABLE IF NOT EXISTS quotes (
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, market_id TEXT,
         bid REAL, ask REAL, fair_price REAL, mid REAL, edge REAL, placed INTEGER DEFAULT 0
@@ -88,8 +91,8 @@ def _seed_demo_data(con):
         pnl = round(random.gauss(0.8, 1.2), 2)  # Positive edge mean
         total_pnl += pnl
         con.execute(
-            "INSERT INTO trades (ts,market_id,market_q,side,price,size,order_id,status,pnl,fill_price) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (ts, mid, mq, side, price, size, f"ord_{i:04d}", "filled", pnl, round(price + 0.005 * (1 if side=="BUY" else -1), 3))
+            "INSERT INTO trades (ts,market_id,market_slug,market_q,side,price,size,order_id,status,pnl,fill_price) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (ts, mid, "", mq, side, price, size, f"ord_{i:04d}", "filled", pnl, round(price + 0.005 * (1 if side=="BUY" else -1), 3))
         )
 
     # BTC prices last 24hrs
@@ -238,10 +241,16 @@ def pnl_curve():
 def recent_trades():
     con = get_db()
     rows = con.execute(
-        """SELECT ts, market_q, side, price, size, pnl, status
+        """SELECT ts, market_id, market_slug, market_q, side, price, size, pnl, status
            FROM trades ORDER BY ts DESC LIMIT 75"""
     ).fetchall()
-    return jsonify([dict(r) for r in rows])
+    out = []
+    for r in rows:
+        d = dict(r)
+        slug = (d.get("market_slug") or "").strip()
+        d["market_url"] = f"https://polymarket.com/event/{slug}" if slug else None
+        out.append(d)
+    return jsonify(out)
 
 @app.route("/api/trades/markets")
 def market_breakdown():

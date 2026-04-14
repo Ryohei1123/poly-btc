@@ -423,10 +423,11 @@
                 <th>Price</th>
                 <th>Size</th>
                 <th>PnL</th>
+                <th>Market URL</th>
               </tr>
             </thead>
             <tbody id="trades-body">
-              <tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Loading…</td></tr>
+              <tr><td colspan="7" style="text-align:center;color:var(--text3);padding:20px">Loading…</td></tr>
             </tbody>
           </table>
         </div>
@@ -733,7 +734,7 @@ async function loadTrades() {
   const data = await fetchJSON('/api/trades/recent');
   const tbody = document.getElementById('trades-body');
   if (!data.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">No trades yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text3);padding:20px">No trades yet</td></tr>';
     return;
   }
   tbody.innerHTML = data.map(t => `
@@ -744,6 +745,11 @@ async function loadTrades() {
       <td>${(+t.price).toFixed(3)}</td>
       <td>$${(+t.size).toFixed(0)}</td>
       <td class="${(+t.pnl)>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(+t.pnl)}</td>
+      <td>${
+        t.market_url
+          ? `<a href="${t.market_url}" target="_blank" rel="noopener noreferrer" style="color:var(--green);text-decoration:none">${truncate(t.market_url.replace('https://',''), 34)}</a>`
+          : '<span style="color:var(--text3)">—</span>'
+      }</td>
     </tr>
   `).join('');
 }

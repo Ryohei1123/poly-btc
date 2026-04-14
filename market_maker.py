@@ -98,6 +98,7 @@ def init_db(path: str):
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             ts          TEXT    NOT NULL,
             market_id   TEXT    NOT NULL,
+            market_slug TEXT,
             market_q    TEXT,
             side        TEXT    NOT NULL,
             price       REAL    NOT NULL,
@@ -108,6 +109,9 @@ def init_db(path: str):
             fill_price  REAL
         )
     """)
+    trade_cols = {r[1] for r in con.execute("PRAGMA table_info(trades)").fetchall()}
+    if "market_slug" not in trade_cols:
+        con.execute("ALTER TABLE trades ADD COLUMN market_slug TEXT")
     con.execute("""
         CREATE TABLE IF NOT EXISTS quotes (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,6 +165,7 @@ db = init_db(config.DB_PATH)
 @dataclass
 class Market:
     condition_id: str
+    slug: str
     question: str
     yes_token: str
     no_token: str
@@ -251,7 +256,7 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
                 "active": "true",
                 "closed": "false",
                 "tag_slug": "crypto",
-                "limit": 50,
+                "limit": 500,
                 "_order": "volume",
             },
             timeout=aiohttp.ClientTimeout(total=10)
@@ -270,15 +275,45 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
         if not m.get("active"):
             continue
 
+        # Gamma API shape changed over time. Support both:
+        # 1) legacy "tokens" objects
+        # 2) modern "clobTokenIds" + "outcomes"/"outcomePrices"
+        yes_token = ""
+        no_token = ""
         tokens = m.get("tokens", [])
-        if len(tokens) < 2:
-            continue
+        if tokens and len(tokens) >= 2:
+            yes_tok = next((t for t in tokens if t.get("outcome", "").lower() == "yes"), tokens[0])
+            no_tok = next((t for t in tokens if t.get("outcome", "").lower() == "no"), tokens[1])
+            yes_token = yes_tok.get("token_id", "")
+            no_token = no_tok.get("token_id", "")
+        else:
+            clob_ids = m.get("clobTokenIds") or []
+            outcomes_raw = m.get("outcomes")
+            outcomes = []
+            if isinstance(outcomes_raw, list):
+                outcomes = [str(x).lower() for x in outcomes_raw]
+            elif isinstance(outcomes_raw, str):
+                try:
+                    outcomes = [str(x).lower() for x in json.loads(outcomes_raw)]
+                except Exception:
+                    outcomes = []
 
-        yes_tok = next((t for t in tokens if t.get("outcome","").lower() == "yes"), tokens[0])
-        no_tok  = next((t for t in tokens if t.get("outcome","").lower() == "no"),  tokens[1])
+            if len(clob_ids) >= 2:
+                yes_idx = outcomes.index("yes") if "yes" in outcomes else 0
+                no_idx = outcomes.index("no") if "no" in outcomes else (1 if yes_idx == 0 else 0)
+                yes_token = str(clob_ids[yes_idx])
+                no_token = str(clob_ids[no_idx])
+
+        if not yes_token or not no_token:
+            continue
 
         # Parse prices from outcomePrices field
         outcome_prices = m.get("outcomePrices", ["0.5", "0.5"])
+        if isinstance(outcome_prices, str):
+            try:
+                outcome_prices = json.loads(outcome_prices)
+            except Exception:
+                outcome_prices = ["0.5", "0.5"]
         try:
             yes_price = float(outcome_prices[0])
             no_price  = float(outcome_prices[1])
@@ -287,9 +322,10 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
 
         results.append(Market(
             condition_id=m.get("conditionId", m.get("id", "")),
+            slug=m.get("slug", ""),
             question=m.get("question", ""),
-            yes_token=yes_tok.get("token_id", ""),
-            no_token=no_tok.get("token_id", ""),
+            yes_token=yes_token,
+            no_token=no_token,
             yes_price=yes_price,
             no_price=no_price,
             volume=float(m.get("volume", 0) or 0),
@@ -332,13 +368,19 @@ def extract_strike_from_question(question: str) -> Optional[float]:
     patterns = [
         r'\$([0-9]{1,3}(?:,[0-9]{3})+)',  # $90,000
         r'\$([0-9]+)k\b',                  # $95k
+        r'\$([0-9]+(?:\.[0-9]+)?)m\b',     # $1m, $1.5m
         r'\$([0-9]{4,6})\b',               # $90000
     ]
     for pat in patterns:
         m = re.search(pat, question, re.IGNORECASE)
         if m:
             val = m.group(1).replace(",", "")
-            mult = 1000 if "k" in question[m.start():m.end()].lower() else 1
+            token = question[m.start():m.end()].lower()
+            mult = 1
+            if "k" in token:
+                mult = 1000
+            elif "m" in token:
+                mult = 1_000_000
             return float(val) * mult
     return None
 
@@ -548,10 +590,10 @@ async def place_order(
         )
         state.total_trades += 1
         db.execute(
-            """INSERT INTO trades (ts,market_id,market_q,side,price,size,order_id,status,pnl,fill_price)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO trades (ts,market_id,market_slug,market_q,side,price,size,order_id,status,pnl,fill_price)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (datetime.now(timezone.utc).isoformat(),
-             market.condition_id, market.question,
+             market.condition_id, market.slug, market.question,
              side, price, size, order_id, status, trade_pnl, fill_price)
         )
         db.commit()
@@ -587,10 +629,10 @@ async def place_order(
 
         state.total_trades += 1
         db.execute(
-            """INSERT INTO trades (ts,market_id,market_q,side,price,size,order_id,status)
-               VALUES (?,?,?,?,?,?,?,?)""",
+            """INSERT INTO trades (ts,market_id,market_slug,market_q,side,price,size,order_id,status)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (datetime.now(timezone.utc).isoformat(),
-             market.condition_id, market.question,
+             market.condition_id, market.slug, market.question,
              side, price, size, real_id, "open")
         )
         db.commit()
