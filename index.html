@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>PolyBot — Market Making Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+
+  :root {
+    --bg:        #080c12;
+    --bg2:       #0d1420;
+    --bg3:       #111928;
+    --border:    #1d2d45;
+    --border2:   #243550;
+    --green:     #00e5a0;
+    --green2:    #00b87a;
+    --red:       #ff4d6a;
+    --yellow:    #f7c355;
+    --blue:      #4d9fff;
+    --purple:    #a78bfa;
+    --text:      #e2eaf5;
+    --text2:     #7a92b5;
+    --text3:     #3d5270;
+    --mono:      'JetBrains Mono', monospace;
+    --sans:      'Space Grotesk', sans-serif;
+    --glow-g:    0 0 20px rgba(0,229,160,0.15);
+    --glow-r:    0 0 20px rgba(255,77,106,0.15);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Background grid */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(0,229,160,0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,229,160,0.02) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* ─── Header ─── */
+  header {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 28px;
+    background: rgba(8,12,18,0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo {
+    display: flex; align-items: center; gap: 12px;
+  }
+  .logo-icon {
+    width: 36px; height: 36px;
+    background: linear-gradient(135deg, var(--green), var(--blue));
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+    box-shadow: var(--glow-g);
+  }
+  .logo h1 {
+    font-family: var(--mono);
+    font-size: 16px; font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--text);
+  }
+  .logo span {
+    font-size: 11px; color: var(--text2);
+    font-weight: 400; letter-spacing: 0.05em;
+  }
+
+  .header-right { display: flex; align-items: center; gap: 16px; }
+
+  .status-pill {
+    display: flex; align-items: center; gap: 7px;
+    background: rgba(0,229,160,0.08);
+    border: 1px solid rgba(0,229,160,0.25);
+    border-radius: 20px;
+    padding: 5px 12px;
+    font-size: 12px; font-family: var(--mono);
+    color: var(--green);
+  }
+  .status-pill .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 6px var(--green); }
+    50% { opacity: 0.4; box-shadow: none; }
+  }
+
+  .btc-badge {
+    font-family: var(--mono); font-size: 13px; font-weight: 600;
+    color: var(--yellow);
+    background: rgba(247,195,85,0.08);
+    border: 1px solid rgba(247,195,85,0.2);
+    border-radius: 6px; padding: 5px 10px;
+  }
+
+  /* ─── Layout ─── */
+  main {
+    position: relative; z-index: 1;
+    padding: 24px 28px;
+    max-width: 1600px; margin: 0 auto;
+  }
+
+  /* ─── Stats Grid ─── */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px; margin-bottom: 20px;
+  }
+  @media (max-width: 1100px) { .stats-grid { grid-template-columns: repeat(2,1fr); } }
+  @media (max-width: 640px)  { .stats-grid { grid-template-columns: 1fr; } }
+
+  .stat-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    position: relative; overflow: hidden;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .stat-card::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent, var(--green)), transparent);
+    opacity: 0.6;
+  }
+  .stat-card:hover {
+    border-color: var(--border2);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+  }
+
+  .stat-label {
+    font-size: 11px; font-family: var(--mono);
+    color: var(--text3); text-transform: uppercase; letter-spacing: 0.1em;
+    margin-bottom: 10px;
+  }
+  .stat-value {
+    font-family: var(--mono); font-size: 28px; font-weight: 700;
+    line-height: 1;
+    color: var(--accent, var(--green));
+  }
+  .stat-sub {
+    font-size: 11px; color: var(--text2); margin-top: 6px;
+    font-family: var(--mono);
+  }
+  .stat-icon {
+    position: absolute; right: 16px; top: 50%;
+    transform: translateY(-50%);
+    font-size: 28px; opacity: 0.12;
+  }
+
+  /* ─── Charts Row ─── */
+  .charts-row {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 14px; margin-bottom: 20px;
+  }
+  @media (max-width: 900px) { .charts-row { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .panel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .panel-title {
+    font-family: var(--mono); font-size: 12px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text2);
+  }
+  .panel-badge {
+    font-family: var(--mono); font-size: 10px;
+    padding: 3px 8px; border-radius: 10px;
+    background: rgba(0,229,160,0.1);
+    color: var(--green); border: 1px solid rgba(0,229,160,0.2);
+  }
+  .panel-body { padding: 16px; }
+  .chart-wrap { position: relative; height: 220px; }
+
+  /* ─── Bottom Row ─── */
+  .bottom-row {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr 1fr;
+    gap: 14px; margin-bottom: 20px;
+  }
+  @media (max-width: 1100px) { .bottom-row { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 700px)  { .bottom-row { grid-template-columns: 1fr; } }
+
+  /* ─── Trade Table ─── */
+  .trade-table { width: 100%; border-collapse: collapse; }
+  .trade-table th {
+    font-family: var(--mono); font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text3); font-weight: 500;
+    padding: 8px 10px; text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  .trade-table td {
+    font-family: var(--mono); font-size: 11px;
+    padding: 7px 10px; color: var(--text2);
+    border-bottom: 1px solid rgba(29,45,69,0.5);
+    white-space: nowrap;
+  }
+  .trade-table tr:hover td { background: rgba(255,255,255,0.02); }
+  .side-buy  { color: var(--green) !important; }
+  .side-sell { color: var(--red) !important; }
+  .pnl-pos   { color: var(--green) !important; }
+  .pnl-neg   { color: var(--red) !important; }
+
+  /* ─── Market Breakdown ─── */
+  .market-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(29,45,69,0.4);
+  }
+  .market-item:last-child { border-bottom: none; }
+  .market-bar-wrap { flex: 1; height: 4px; background: var(--bg3); border-radius: 2px; }
+  .market-bar { height: 100%; background: var(--green); border-radius: 2px; transition: width 0.8s; }
+  .market-label { font-family: var(--mono); font-size: 10px; color: var(--text2); width: 160px; overflow: hidden; text-overflow: ellipsis; }
+  .market-pnl { font-family: var(--mono); font-size: 11px; font-weight: 600; min-width: 60px; text-align: right; }
+
+  /* ─── Quotes ─── */
+  .quote-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr 50px;
+    gap: 6px; align-items: center;
+    padding: 7px 0;
+    border-bottom: 1px solid rgba(29,45,69,0.4);
+    font-family: var(--mono); font-size: 11px;
+  }
+  .quote-row:last-child { border-bottom: none; }
+  .quote-label { font-size: 10px; color: var(--text3); }
+  .placed-yes { color: var(--green); }
+  .placed-no  { color: var(--text3); }
+
+  /* ─── Log Terminal ─── */
+  .log-terminal {
+    background: #060a0f;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    height: 200px; overflow-y: auto;
+    font-family: var(--mono); font-size: 11px;
+    line-height: 1.7;
+    margin-bottom: 20px;
+  }
+  .log-terminal::-webkit-scrollbar { width: 4px; }
+  .log-terminal::-webkit-scrollbar-track { background: transparent; }
+  .log-terminal::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+  .log-line { color: var(--text3); }
+  .log-line.info    { color: var(--text2); }
+  .log-line.warning { color: var(--yellow); }
+  .log-line.error   { color: var(--red); }
+  .log-line.trade   { color: var(--green); }
+
+  /* ─── Controls ─── */
+  .controls { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+  .btn {
+    font-family: var(--mono); font-size: 12px; font-weight: 600;
+    letter-spacing: 0.05em; text-transform: uppercase;
+    padding: 8px 18px; border-radius: 8px; border: none;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .btn-green {
+    background: var(--green); color: #060a0f;
+  }
+  .btn-green:hover { background: #00ffb3; transform: translateY(-1px); }
+  .btn-red {
+    background: transparent; color: var(--red);
+    border: 1px solid var(--red);
+  }
+  .btn-red:hover { background: rgba(255,77,106,0.1); }
+  .btn-gray {
+    background: var(--bg3); color: var(--text2);
+    border: 1px solid var(--border);
+  }
+  .btn-gray:hover { border-color: var(--border2); }
+
+  /* ─── Win rate ring ─── */
+  .ring-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  svg.ring { transform: rotate(-90deg); }
+  .ring-text { font-family: var(--mono); font-size: 22px; font-weight: 700; color: var(--green); }
+  .ring-sub  { font-family: var(--mono); font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.1em; }
+
+  /* ─── Scrollable table container ─── */
+  .table-scroll { overflow-y: auto; max-height: 280px; }
+  .table-scroll::-webkit-scrollbar { width: 3px; }
+  .table-scroll::-webkit-scrollbar-thumb { background: var(--border2); }
+
+  /* Loading shimmer */
+  .shimmer {
+    background: linear-gradient(90deg, var(--bg3) 25%, var(--border) 50%, var(--bg3) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius: 4px; height: 20px;
+  }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">🤖</div>
+    <div>
+      <h1>POLY<span style="color:var(--green)">BOT</span></h1>
+      <span>Market Making Engine v1.0</span>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="btc-badge" id="btc-badge">BTC $—</div>
+    <div class="status-pill" id="status-pill">
+      <div class="dot"></div>
+      <span id="status-text">LIVE</span>
+    </div>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--text3)" id="last-update">—</div>
+  </div>
+</header>
+
+<main>
+  <!-- Controls -->
+  <div class="controls">
+    <button class="btn btn-green" onclick="refreshAll()">⟳ Refresh</button>
+    <button class="btn btn-gray" onclick="toggleAutoRefresh()">⏱ Auto-refresh: <span id="auto-label">ON</span></button>
+    <button class="btn btn-red" onclick="alert('Kill switch would cancel all open orders and halt the bot.')">🛑 Kill Switch</button>
+    <div style="margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--text3);display:flex;align-items:center;gap:6px;">
+      Mode: <span style="color:var(--yellow);font-weight:600">PAPER TRADING</span>
+      &nbsp;|&nbsp; Set POLY_PRIVATE_KEY for live trading
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-grid">
+    <div class="stat-card" style="--accent:var(--green)">
+      <div class="stat-label">Total PnL</div>
+      <div class="stat-value" id="stat-pnl">$—</div>
+      <div class="stat-sub" id="stat-pnl-sub">Loading…</div>
+      <div class="stat-icon">💰</div>
+    </div>
+    <div class="stat-card" style="--accent:var(--blue)">
+      <div class="stat-label">Total Trades</div>
+      <div class="stat-value" id="stat-trades">—</div>
+      <div class="stat-sub" id="stat-trades-sub">Loading…</div>
+      <div class="stat-icon">⚡</div>
+    </div>
+    <div class="stat-card" style="--accent:var(--yellow)">
+      <div class="stat-label">Daily PnL</div>
+      <div class="stat-value" id="stat-daily">$—</div>
+      <div class="stat-sub" id="stat-daily-sub">Last 24 hours</div>
+      <div class="stat-icon">📅</div>
+    </div>
+    <div class="stat-card" style="--accent:var(--purple)">
+      <div class="stat-label">Win Rate</div>
+      <div class="stat-value" id="stat-wr">—%</div>
+      <div class="stat-sub" id="stat-wr-sub">Profitable trades</div>
+      <div class="stat-icon">🎯</div>
+    </div>
+  </div>
+
+  <!-- Charts row -->
+  <div class="charts-row">
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Cumulative PnL Curve</span>
+        <span class="panel-badge" id="pnl-badge">30d</span>
+      </div>
+      <div class="panel-body">
+        <div class="chart-wrap"><canvas id="pnl-chart"></canvas></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">BTC Price (24h)</span>
+        <span class="panel-badge" id="btc-badge2">—</span>
+      </div>
+      <div class="panel-body">
+        <div class="chart-wrap"><canvas id="btc-chart"></canvas></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Row -->
+  <div class="bottom-row">
+    <!-- Recent Trades -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Recent Trades</span>
+        <span class="panel-badge" id="trades-badge">—</span>
+      </div>
+      <div class="panel-body" style="padding:0">
+        <div class="table-scroll">
+          <table class="trade-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Market</th>
+                <th>Side</th>
+                <th>Price</th>
+                <th>Size</th>
+                <th>PnL</th>
+              </tr>
+            </thead>
+            <tbody id="trades-body">
+              <tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Market Breakdown -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Markets PnL Breakdown</span>
+      </div>
+      <div class="panel-body">
+        <div id="markets-breakdown">
+          <div class="shimmer" style="margin-bottom:10px"></div>
+          <div class="shimmer" style="margin-bottom:10px"></div>
+          <div class="shimmer"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hourly bar + win ring -->
+    <div style="display:flex;flex-direction:column;gap:14px;">
+      <div class="panel" style="flex:1">
+        <div class="panel-header">
+          <span class="panel-title">Hourly PnL (48h)</span>
+        </div>
+        <div class="panel-body">
+          <div class="chart-wrap" style="height:160px"><canvas id="hourly-chart"></canvas></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header"><span class="panel-title">Win Rate</span></div>
+        <div class="panel-body" style="display:flex;justify-content:center;padding:12px">
+          <div class="ring-wrap">
+            <svg class="ring" width="90" height="90" viewBox="0 0 90 90">
+              <circle cx="45" cy="45" r="36" fill="none" stroke="var(--bg3)" stroke-width="8"/>
+              <circle id="ring-circle" cx="45" cy="45" r="36" fill="none"
+                stroke="var(--green)" stroke-width="8"
+                stroke-dasharray="226.2" stroke-dashoffset="226.2"
+                stroke-linecap="round" style="transition:stroke-dashoffset 1s"/>
+            </svg>
+            <div class="ring-text" id="ring-pct">—%</div>
+            <div class="ring-sub">win rate</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Live Log -->
+  <div class="panel-header" style="background:var(--bg2);border:1px solid var(--border);border-radius:12px 12px 0 0;border-bottom:none;margin-bottom:0">
+    <span class="panel-title">Live Log</span>
+    <span class="panel-badge">TAIL</span>
+  </div>
+  <div class="log-terminal" id="log-output" style="border-radius:0 0 12px 12px;margin-bottom:20px">
+    <div class="log-line">Waiting for bot data…</div>
+  </div>
+
+  <!-- Recent Quotes -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Recent Quotes</span>
+      <span class="panel-badge">CLOB</span>
+    </div>
+    <div class="panel-body" style="padding:0 16px">
+      <div class="quote-row" style="font-size:10px;color:var(--text3);font-family:var(--mono);border-bottom:1px solid var(--border);padding:6px 0">
+        <span>MARKET</span><span>FAIR</span><span>BID/ASK</span><span>EDGE</span><span>PLACED</span>
+      </div>
+      <div id="quotes-body">
+        <div class="shimmer" style="margin:8px 0"></div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ─── Chart instances ─────────────────────────────────────────────────────────
+let pnlChart, btcChart, hourlyChart;
+let autoRefreshOn = true;
+let autoTimer;
+
+const CHART_DEFAULTS = {
+  borderWidth: 2,
+  pointRadius: 0,
+  tension: 0.4,
+};
+
+function makeGradient(ctx, color) {
+  const g = ctx.createLinearGradient(0, 0, 0, 220);
+  g.addColorStop(0, color + '40');
+  g.addColorStop(1, color + '00');
+  return g;
+}
+
+// ─── PnL Curve Chart ─────────────────────────────────────────────────────────
+function initPnlChart(labels, values) {
+  const ctx = document.getElementById('pnl-chart').getContext('2d');
+  const grad = makeGradient(ctx, '#00e5a0');
+  pnlChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'PnL ($)',
+        data: values,
+        borderColor: '#00e5a0',
+        backgroundColor: grad,
+        fill: true,
+        ...CHART_DEFAULTS,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: {
+        backgroundColor: '#0d1420', borderColor: '#1d2d45', borderWidth: 1,
+        titleColor: '#7a92b5', bodyColor: '#e2eaf5',
+        callbacks: { label: ctx => ' $' + ctx.raw.toLocaleString('en', {maximumFractionDigits:0}) }
+      }},
+      scales: {
+        x: { ticks: { color:'#3d5270', maxTicksLimit:8, font:{family:'JetBrains Mono',size:10} }, grid: { color:'#1d2d45' } },
+        y: { ticks: { color:'#3d5270', font:{family:'JetBrains Mono',size:10}, callback: v=>'$'+v.toLocaleString() }, grid: { color:'#1d2d45' } }
+      }
+    }
+  });
+}
+
+// ─── BTC Chart ────────────────────────────────────────────────────────────────
+function initBtcChart(labels, values) {
+  const ctx = document.getElementById('btc-chart').getContext('2d');
+  const grad = makeGradient(ctx, '#f7c355');
+  btcChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'BTC ($)',
+        data: values,
+        borderColor: '#f7c355',
+        backgroundColor: grad,
+        fill: true,
+        ...CHART_DEFAULTS,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: {
+        backgroundColor: '#0d1420', borderColor: '#1d2d45', borderWidth: 1,
+        titleColor: '#7a92b5', bodyColor: '#e2eaf5',
+        callbacks: { label: ctx => ' $' + ctx.raw.toLocaleString('en',{maximumFractionDigits:0}) }
+      }},
+      scales: {
+        x: { ticks: { color:'#3d5270', maxTicksLimit:6, font:{family:'JetBrains Mono',size:9} }, grid: { color:'#1d2d45' } },
+        y: { ticks: { color:'#3d5270', font:{family:'JetBrains Mono',size:9}, callback: v=>'$'+v.toLocaleString() }, grid: { color:'#1d2d45' } }
+      }
+    }
+  });
+}
+
+// ─── Hourly Chart ─────────────────────────────────────────────────────────────
+function initHourlyChart(labels, values) {
+  const ctx = document.getElementById('hourly-chart').getContext('2d');
+  hourlyChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'PnL',
+        data: values,
+        backgroundColor: values.map(v => v >= 0 ? 'rgba(0,229,160,0.6)' : 'rgba(255,77,106,0.6)'),
+        borderColor: values.map(v => v >= 0 ? '#00e5a0' : '#ff4d6a'),
+        borderWidth: 1, borderRadius: 2,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: {
+        backgroundColor:'#0d1420', borderColor:'#1d2d45', borderWidth:1,
+        callbacks: { label: ctx => ' $' + ctx.raw.toFixed(2) }
+      }},
+      scales: {
+        x: { ticks: { color:'#3d5270', maxTicksLimit:6, font:{family:'JetBrains Mono',size:9} }, grid: { color:'#1d2d45' } },
+        y: { ticks: { color:'#3d5270', font:{family:'JetBrains Mono',size:9} }, grid: { color:'#1d2d45' } }
+      }
+    }
+  });
+}
+
+function updateChart(chart, labels, data) {
+  chart.data.labels = labels;
+  chart.data.datasets[0].data = data;
+  if (chart === hourlyChart) {
+    chart.data.datasets[0].backgroundColor = data.map(v => v >= 0 ? 'rgba(0,229,160,0.6)' : 'rgba(255,77,106,0.6)');
+    chart.data.datasets[0].borderColor = data.map(v => v >= 0 ? '#00e5a0' : '#ff4d6a');
+  }
+  chart.update('none');
+}
+
+// ─── Data fetching ────────────────────────────────────────────────────────────
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  return r.json();
+}
+
+function fmtPnl(v) {
+  const sign = v >= 0 ? '+' : '';
+  return sign + '$' + Math.abs(v).toLocaleString('en', {maximumFractionDigits:0});
+}
+function fmtTime(iso) {
+  return iso ? iso.slice(11,16) : '—';
+}
+function truncate(s, n) {
+  return s && s.length > n ? s.slice(0,n)+'…' : (s||'');
+}
+
+async function loadSummary() {
+  const d = await fetchJSON('/api/summary');
+  document.getElementById('stat-pnl').textContent = fmtPnl(d.realized_pnl);
+  document.getElementById('stat-pnl').style.color = d.realized_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('stat-pnl-sub').textContent = `Daily: ${fmtPnl(d.daily_pnl)}`;
+  document.getElementById('stat-trades').textContent = d.total_trades.toLocaleString();
+  document.getElementById('stat-trades-sub').textContent = `${d.open_orders} open orders`;
+  document.getElementById('stat-daily').textContent = fmtPnl(d.daily_pnl);
+  document.getElementById('stat-daily').style.color = d.daily_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('stat-wr').textContent = d.win_rate + '%';
+  document.getElementById('stat-wr-sub').textContent = `${d.active_markets} active markets`;
+  document.getElementById('btc-badge').textContent = 'BTC $' + d.btc_price.toLocaleString('en',{maximumFractionDigits:0});
+  document.getElementById('btc-badge2').textContent = '$' + d.btc_price.toLocaleString('en',{maximumFractionDigits:0});
+  document.getElementById('trades-badge').textContent = d.total_trades + ' total';
+
+  // Ring
+  const pct = d.win_rate;
+  document.getElementById('ring-pct').textContent = pct + '%';
+  const circ = 2 * Math.PI * 36;
+  document.getElementById('ring-circle').setAttribute('stroke-dashoffset', circ * (1 - pct/100));
+}
+
+async function loadPnlCurve() {
+  const data = await fetchJSON('/api/pnl_curve');
+  const labels = data.map(d => d.ts.slice(5,16));
+  const values = data.map(d => d.pnl);
+  if (!pnlChart) initPnlChart(labels, values);
+  else updateChart(pnlChart, labels, values);
+  const last = values[values.length-1];
+  document.getElementById('pnl-badge').textContent = '$' + (last||0).toLocaleString('en',{maximumFractionDigits:0});
+}
+
+async function loadBtc() {
+  const data = await fetchJSON('/api/btc');
+  const labels = data.map(d => d.ts.slice(11,16));
+  const values = data.map(d => d.price);
+  if (!btcChart) initBtcChart(labels, values);
+  else updateChart(btcChart, labels, values);
+}
+
+async function loadTrades() {
+  const data = await fetchJSON('/api/trades/recent');
+  const tbody = document.getElementById('trades-body');
+  tbody.innerHTML = data.map(t => `
+    <tr>
+      <td>${fmtTime(t.ts)}</td>
+      <td title="${t.market_q||''}">${truncate(t.market_q||'—', 28)}</td>
+      <td class="side-${t.side.toLowerCase()}">${t.side}</td>
+      <td>${(+t.price).toFixed(3)}</td>
+      <td>$${(+t.size).toFixed(0)}</td>
+      <td class="${(+t.pnl)>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(+t.pnl)}</td>
+    </tr>
+  `).join('');
+}
+
+async function loadMarkets() {
+  const data = await fetchJSON('/api/trades/markets');
+  if (!data.length) return;
+  const maxPnl = Math.max(...data.map(d => Math.abs(+d.total_pnl)));
+  document.getElementById('markets-breakdown').innerHTML = data.slice(0,6).map(m => `
+    <div class="market-item">
+      <div class="market-label" title="${m.market_q||''}">${truncate(m.market_q||'—', 22)}</div>
+      <div class="market-bar-wrap">
+        <div class="market-bar" style="width:${(Math.abs(+m.total_pnl)/maxPnl*100).toFixed(1)}%;background:${(+m.total_pnl)>=0?'var(--green)':'var(--red)'}"></div>
+      </div>
+      <div class="market-pnl" style="color:${(+m.total_pnl)>=0?'var(--green)':'var(--red)'}">${fmtPnl(+m.total_pnl)}</div>
+    </div>
+  `).join('');
+}
+
+async function loadHourly() {
+  const data = await fetchJSON('/api/hourly_pnl');
+  const labels = data.map(d => d.hour.slice(11,16));
+  const values = data.map(d => +(+d.pnl).toFixed(2));
+  if (!hourlyChart) initHourlyChart(labels, values);
+  else updateChart(hourlyChart, labels, values);
+}
+
+async function loadQuotes() {
+  const data = await fetchJSON('/api/quotes/recent');
+  document.getElementById('quotes-body').innerHTML = data.map(q => `
+    <div class="quote-row">
+      <span style="color:var(--text2);overflow:hidden;text-overflow:ellipsis">${truncate(q.market_id||'—', 16)}</span>
+      <span style="color:var(--yellow)">${(+q.fair_price).toFixed(3)}</span>
+      <span style="color:var(--blue)">${(+q.bid).toFixed(3)} / ${(+q.ask).toFixed(3)}</span>
+      <span style="color:${(+q.edge)>=0.015?'var(--green)':'var(--text3)'}">${(+q.edge).toFixed(3)}</span>
+      <span class="${q.placed?'placed-yes':'placed-no'}">${q.placed?'✓':'—'}</span>
+    </div>
+  `).join('') || '<div style="padding:12px 0;color:var(--text3);font-family:var(--mono);font-size:11px">No quotes yet</div>';
+}
+
+async function loadLogs() {
+  try {
+    const data = await fetchJSON('/api/logs');
+    const el = document.getElementById('log-output');
+    if (data.lines && data.lines.length) {
+      el.innerHTML = data.lines.map(line => {
+        let cls = 'log-line';
+        if (line.includes('ERROR') || line.includes('CRIT')) cls += ' error';
+        else if (line.includes('WARNING') || line.includes('WARN')) cls += ' warning';
+        else if (line.includes('BUY') || line.includes('SELL') || line.includes('PAPER') || line.includes('LIVE')) cls += ' trade';
+        else cls += ' info';
+        return `<div class="${cls}">${line}</div>`;
+      }).join('');
+      el.scrollTop = el.scrollHeight;
+    }
+  } catch(e) {
+    // Log file not found yet — show placeholder
+    document.getElementById('log-output').innerHTML =
+      '<div class="log-line info">Bot not started yet. Run: python bot/market_maker.py</div>';
+  }
+}
+
+// ─── Refresh all ─────────────────────────────────────────────────────────────
+async function refreshAll() {
+  document.getElementById('last-update').textContent = 'Refreshing…';
+  await Promise.all([
+    loadSummary(),
+    loadPnlCurve(),
+    loadBtc(),
+    loadTrades(),
+    loadMarkets(),
+    loadHourly(),
+    loadQuotes(),
+    loadLogs(),
+  ]);
+  document.getElementById('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+function toggleAutoRefresh() {
+  autoRefreshOn = !autoRefreshOn;
+  document.getElementById('auto-label').textContent = autoRefreshOn ? 'ON' : 'OFF';
+  if (autoRefreshOn) startAutoRefresh();
+  else clearInterval(autoTimer);
+}
+
+function startAutoRefresh() {
+  clearInterval(autoTimer);
+  autoTimer = setInterval(refreshAll, 15000);
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+refreshAll();
+startAutoRefresh();
+</script>
+</body>
+</html>
