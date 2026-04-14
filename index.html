@@ -592,7 +592,7 @@ function initLineChart({ canvasId, labels, values, lineColor, datasetLabel, xTic
       plugins: { legend: { display: false }, tooltip: {
         backgroundColor: '#0d1420', borderColor: '#1d2d45', borderWidth: 1,
         titleColor: '#7a92b5', bodyColor: '#e2eaf5',
-        callbacks: { label: ctx => ' $' + ctx.raw.toLocaleString('en', {maximumFractionDigits:0}) }
+        callbacks: { label: ctx => ' $' + fmtNum(ctx.raw, 0) }
       }},
       scales: {
         x: { ticks: { color:'#3d5270', maxTicksLimit:xTicks, font:{family:'JetBrains Mono',size:tickSize} }, grid: { color:'#1d2d45' } },
@@ -675,13 +675,16 @@ async function fetchJSON(url) {
 
 function fmtPnl(v) {
   const sign = v >= 0 ? '+' : '';
-  return sign + '$' + Math.abs(v).toLocaleString('en', {maximumFractionDigits:0});
+  return sign + '$' + fmtNum(Math.abs(v), 0);
 }
 function fmtTime(iso) {
   return iso ? iso.slice(11,16) : '—';
 }
 function truncate(s, n) {
   return s && s.length > n ? s.slice(0,n)+'…' : (s||'');
+}
+function fmtNum(v, maxFractionDigits = 0) {
+  return Number(v || 0).toLocaleString('en', { maximumFractionDigits: maxFractionDigits });
 }
 
 async function loadStatus() {
@@ -735,15 +738,15 @@ async function loadSummary() {
 
   el('stat-pnl').textContent = fmtPnl(realizedPnl);
   el('stat-pnl').style.color = realizedPnl >= 0 ? 'var(--green)' : 'var(--red)';
-  el('stat-pnl-sub').textContent = `Equity: $${equity.toLocaleString('en', {maximumFractionDigits:2})} | ROI: ${roiPct.toFixed(2)}%`;
+  el('stat-pnl-sub').textContent = `Equity: $${fmtNum(equity, 2)} | ROI: ${roiPct.toFixed(2)}%`;
   el('stat-trades').textContent = totalTrades.toLocaleString();
   el('stat-trades-sub').textContent = `${openOrders} open orders | Start: $${startingBalance.toFixed(0)}`;
   el('stat-daily').textContent = fmtPnl(dailyPnl);
   el('stat-daily').style.color = dailyPnl >= 0 ? 'var(--green)' : 'var(--red)';
   el('stat-wr').textContent = winRate + '%';
   el('stat-wr-sub').textContent = `${activeMarkets} active markets`;
-  el('btc-badge').textContent = 'BTC $' + btcPrice.toLocaleString('en',{maximumFractionDigits:0});
-  el('btc-badge2').textContent = '$' + btcPrice.toLocaleString('en',{maximumFractionDigits:0});
+  el('btc-badge').textContent = 'BTC $' + fmtNum(btcPrice, 0);
+  el('btc-badge2').textContent = '$' + fmtNum(btcPrice, 0);
   el('trades-badge').textContent = totalTrades + ' total';
 
   // Ring
@@ -765,7 +768,7 @@ async function loadPnlCurve() {
   if (!pnlChart) initPnlChart(labels, values);
   else updateChart(pnlChart, labels, values);
   const last = values[values.length-1];
-  el('pnl-badge').textContent = '$' + (last||0).toLocaleString('en',{maximumFractionDigits:0});
+  el('pnl-badge').textContent = '$' + fmtNum(last || 0, 0);
 }
 
 async function loadBtc() {
@@ -788,12 +791,12 @@ async function loadTrades() {
       <td>${fmtTime(t.ts)}</td>
       <td title="${t.market_q||''}">
         ${truncate(t.market_q||'—', 28)}
-        <div style="color:var(--text3);font-size:10px;margin-top:2px">${(+t.contracts).toLocaleString('en', {maximumFractionDigits:2})} ${t.outcome || 'YES'} @ ${(+(t.price_cents || 0)).toFixed(2)}c</div>
+        <div style="color:var(--text3);font-size:10px;margin-top:2px">${fmtNum(+t.contracts, 2)} ${t.outcome || 'YES'} @ ${(+(t.price_cents || 0)).toFixed(2)}c</div>
       </td>
       <td style="color:var(--yellow)">${t.outcome || 'YES'}</td>
       <td class="side-${t.side.toLowerCase()}">${t.side}</td>
       <td>${(+(t.price_cents || 0)).toFixed(2)}c</td>
-      <td>${(+t.contracts).toLocaleString('en', {maximumFractionDigits:2})}</td>
+      <td>${fmtNum(+t.contracts, 2)}</td>
       <td>$${(+(t.notional_usdc || t.size || 0)).toFixed(0)}</td>
       <td class="${(+t.pnl)>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(+t.pnl)} <span style="font-size:10px;opacity:0.8">(${(+t.return_pct).toFixed(2)}%)</span></td>
       <td>${

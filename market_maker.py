@@ -153,6 +153,52 @@ def init_db(database_url: str):
 
 db = init_db(config.DATABASE_URL)
 
+SQL_UPSERT_BTC_PRICE = """
+        INSERT INTO btc_prices (ts, price)
+        VALUES (%s, %s)
+        ON CONFLICT (ts) DO UPDATE SET price = EXCLUDED.price
+        """
+SQL_INSERT_QUOTE = """INSERT INTO quotes (ts,market_id,bid,ask,fair_price,mid,edge,placed)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"""
+SQL_INSERT_TRADE = """INSERT INTO trades
+           (ts,market_id,market_slug,event_slug,market_q,mode,side,price,size,notional_usdc,size_shares,order_id,status,pnl,fill_price)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+SQL_UPSERT_BOT_STATS = """INSERT INTO bot_stats
+           (ts,total_trades,open_positions,realized_pnl,unrealized_pnl,daily_pnl,balance,active_markets)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT (ts) DO UPDATE
+           SET total_trades = EXCLUDED.total_trades,
+               open_positions = EXCLUDED.open_positions,
+               realized_pnl = EXCLUDED.realized_pnl,
+               unrealized_pnl = EXCLUDED.unrealized_pnl,
+               daily_pnl = EXCLUDED.daily_pnl,
+               balance = EXCLUDED.balance,
+               active_markets = EXCLUDED.active_markets"""
+SQL_DAILY_PNL = "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='filled' AND ts > (NOW() - INTERVAL '1 day')"
+SQL_UPSERT_RUNTIME_STATE = """INSERT INTO runtime_state
+           (id,updated_at,running,kill_switch,paper_mode,btc_price,btc_source,ws_connected,ws_tick_age_sec,cycle_latency_ms,orders_placed_cycle,last_cycle,errors)
+           VALUES (1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT (id) DO UPDATE
+           SET updated_at = EXCLUDED.updated_at,
+               running = EXCLUDED.running,
+               kill_switch = EXCLUDED.kill_switch,
+               paper_mode = EXCLUDED.paper_mode,
+               btc_price = EXCLUDED.btc_price,
+               btc_source = EXCLUDED.btc_source,
+               ws_connected = EXCLUDED.ws_connected,
+               ws_tick_age_sec = EXCLUDED.ws_tick_age_sec,
+               cycle_latency_ms = EXCLUDED.cycle_latency_ms,
+               orders_placed_cycle = EXCLUDED.orders_placed_cycle,
+               last_cycle = EXCLUDED.last_cycle,
+               errors = EXCLUDED.errors"""
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+def db_write(query: str, params: tuple) -> None:
+    db.execute(query, params)
+    db.commit()
+
 # ─── Data Models ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -349,15 +395,10 @@ async def get_btc_price(session: aiohttp.ClientSession) -> float:
         price = state.btc_price or 85000.0
 
     state.btc_price = price
-    db.execute(
-        """
-        INSERT INTO btc_prices (ts, price)
-        VALUES (%s, %s)
-        ON CONFLICT (ts) DO UPDATE SET price = EXCLUDED.price
-        """,
-        (datetime.now(timezone.utc), price),
+    db_write(
+        SQL_UPSERT_BTC_PRICE,
+        (utcnow(), price),
     )
-    db.commit()
     return price
 
 async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
@@ -592,13 +633,11 @@ async def compute_quote(session: aiohttp.ClientSession, market: Market) -> Optio
     )
 
     # Log to DB
-    db.execute(
-        """INSERT INTO quotes (ts,market_id,bid,ask,fair_price,mid,edge,placed)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (datetime.now(timezone.utc),
+    db_write(
+        SQL_INSERT_QUOTE,
+        (utcnow(),
          market.condition_id, bid, ask, fair, mid, edge, int(should_place))
     )
-    db.commit()
 
     return q
 
@@ -636,12 +675,10 @@ def persist_trade(
     fill_price: Optional[float] = None,
 ) -> None:
     """Persist a trade event with a consistent schema across modes."""
-    db.execute(
-        """INSERT INTO trades
-           (ts,market_id,market_slug,event_slug,market_q,mode,side,price,size,notional_usdc,size_shares,order_id,status,pnl,fill_price)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+    db_write(
+        SQL_INSERT_TRADE,
         (
-            datetime.now(timezone.utc),
+            utcnow(),
             market.condition_id,
             market.slug,
             market.event_slug,
@@ -658,7 +695,6 @@ def persist_trade(
             fill_price,
         ),
     )
-    db.commit()
 
 async def place_order(
     session: aiohttp.ClientSession,
@@ -883,20 +919,10 @@ def update_stats():
     """Persist bot stats snapshot to DB."""
     state.daily_pnl = compute_daily_pnl()
     refresh_account_state()
-    db.execute(
-        """INSERT INTO bot_stats
-           (ts,total_trades,open_positions,realized_pnl,unrealized_pnl,daily_pnl,balance,active_markets)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-           ON CONFLICT (ts) DO UPDATE
-           SET total_trades = EXCLUDED.total_trades,
-               open_positions = EXCLUDED.open_positions,
-               realized_pnl = EXCLUDED.realized_pnl,
-               unrealized_pnl = EXCLUDED.unrealized_pnl,
-               daily_pnl = EXCLUDED.daily_pnl,
-               balance = EXCLUDED.balance,
-               active_markets = EXCLUDED.active_markets""",
+    db_write(
+        SQL_UPSERT_BOT_STATS,
         (
-            datetime.now(timezone.utc),
+            utcnow(),
             state.total_trades,
             len(state.open_positions),
             state.realized_pnl,
@@ -906,7 +932,6 @@ def update_stats():
             len(state.active_markets),
         )
     )
-    db.commit()
 
 # ─── Main Loop ────────────────────────────────────────────────────────────────
 
@@ -1052,34 +1077,17 @@ async def main_loop():
     log.info("Bot stopped.")
 
 def compute_daily_pnl() -> float:
-    row = db.execute(
-        "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='filled' AND ts > (NOW() - INTERVAL '1 day')"
-    ).fetchone()
+    row = db.execute(SQL_DAILY_PNL).fetchone()
     return float(row[0] or 0.0)
 
 def update_runtime_state():
     now_ts = time.time()
     ws_age = (now_ts - state.ws_last_tick) if state.ws_last_tick > 0 else 9999.0
     btc_source = "ws" if (state.ws_connected and ws_age <= 15 and state.ws_btc_price > 0) else "ref"
-    db.execute(
-        """INSERT INTO runtime_state
-           (id,updated_at,running,kill_switch,paper_mode,btc_price,btc_source,ws_connected,ws_tick_age_sec,cycle_latency_ms,orders_placed_cycle,last_cycle,errors)
-           VALUES (1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-           ON CONFLICT (id) DO UPDATE
-           SET updated_at = EXCLUDED.updated_at,
-               running = EXCLUDED.running,
-               kill_switch = EXCLUDED.kill_switch,
-               paper_mode = EXCLUDED.paper_mode,
-               btc_price = EXCLUDED.btc_price,
-               btc_source = EXCLUDED.btc_source,
-               ws_connected = EXCLUDED.ws_connected,
-               ws_tick_age_sec = EXCLUDED.ws_tick_age_sec,
-               cycle_latency_ms = EXCLUDED.cycle_latency_ms,
-               orders_placed_cycle = EXCLUDED.orders_placed_cycle,
-               last_cycle = EXCLUDED.last_cycle,
-               errors = EXCLUDED.errors""",
+    db_write(
+        SQL_UPSERT_RUNTIME_STATE,
         (
-            datetime.now(timezone.utc),
+            utcnow(),
             int(state.running),
             int(state.kill_switch),
             int(state.paper_mode),
@@ -1093,7 +1101,6 @@ def update_runtime_state():
             len(state.errors),
         ),
     )
-    db.commit()
 
 if __name__ == "__main__":
     asyncio.run(main_loop())
