@@ -68,7 +68,7 @@ pip install py-clob-client
 Every 30 seconds:
   1. GET BTC spot from Binance + Coinbase + Kraken  → median BTC reference
   2. GET gamma-api.polymarket.com/markets?tag=crypto → active BTC markets
-  3. For each market:
+  3. For each supported BTC terminal-price market:
        strike = parse "$X" from question
        dte    = days until expiry
        fair   = log_normal_cdf(btc_price, strike, dte, vol=80%)
@@ -79,6 +79,13 @@ Every 30 seconds:
          POST bid @ fair - 2%
          POST ask @ fair + 2%
 ```
+
+Supported question styles:
+- terminal-style (e.g. "be above/below $X on/by date")
+- barrier-style (e.g. "hit/reach/touch $X by date")
+- comparative-event BTC barriers with explicit 50-50 fallback (e.g. "BTC hits $X before Y"; modeled with BTC hit hazard vs anchor-event hazard)
+
+Unsupported/complex market structures that do not match the three models above are skipped by design to avoid model mismatch.
 
 The spread capture comes from:
 - Market participants who trade at taker (market order)
@@ -124,6 +131,8 @@ Runtime env vars:
 - `POLY_MAX_ORDERS_PER_CYCLE` per-cycle order throttle
 - `POLY_CANCEL_BEFORE_REQUOTE=1` cancel stale live orders before each quote cycle
 - `POLY_BTC_REFERENCE_REFRESH_SEC=120` reference median refresh cadence in seconds
+- `POLY_ANCHOR_EVENT_HAZARD_PER_DAY` generic anchor-event hazard for comparative-event model
+- `POLY_GTA_RELEASE_HAZARD_PER_DAY` GTA-specific anchor-event hazard override
 
 ## Run 24/7 (Linux)
 
@@ -169,4 +178,5 @@ Open `http://localhost:5050` after running `server.py`:
 - **Win rate ring** — live win/loss ratio
 - **Live log** — tailed bot log output
 - **Quote monitor** — last 30 quotes with edge stats
+- **Quote model visibility** — quote stream shows model type (`terminal`, `barrier`, `comparative_5050`)
 - **Header telemetry** — bot status, websocket health, per-cycle and 10-cycle average orders/latency with simple trend markers (`+` improving/increasing, `-` worsening/decreasing, `=` unchanged) and inline legend (hover, click/tap, keyboard accessible, viewport-aware tooltip placement)

@@ -64,7 +64,7 @@ SQL_MARKET_BREAKDOWN = """SELECT market_q, COUNT(*) as cnt, COALESCE(SUM(pnl), 0
            FROM trades WHERE status='filled'
            GROUP BY market_q ORDER BY total_pnl DESC"""
 SQL_BTC_HISTORY = "SELECT ts, price FROM btc_prices ORDER BY ts DESC LIMIT 288"
-SQL_RECENT_QUOTES = """SELECT ts, market_id, bid, ask, fair_price, mid, edge, placed
+SQL_RECENT_QUOTES = """SELECT ts, market_id, bid, ask, fair_price, mid, edge, placed, model_type
            FROM quotes ORDER BY ts DESC LIMIT 30"""
 SQL_HOURLY_PNL = """SELECT to_char(date_trunc('hour', ts), 'YYYY-MM-DD HH24:00') as hour,
                   COUNT(*) as trades, COALESCE(SUM(pnl), 0) as pnl

@@ -18,8 +18,10 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS size_shares REAL",
     """CREATE TABLE IF NOT EXISTS quotes (
         id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ, market_id TEXT,
-        bid REAL, ask REAL, fair_price REAL, mid REAL, edge REAL, placed INTEGER DEFAULT 0
+        bid REAL, ask REAL, fair_price REAL, mid REAL, edge REAL, placed INTEGER DEFAULT 0,
+        model_type TEXT DEFAULT 'terminal'
     )""",
+    "ALTER TABLE quotes ADD COLUMN IF NOT EXISTS model_type TEXT DEFAULT 'terminal'",
     """CREATE TABLE IF NOT EXISTS btc_prices (ts TIMESTAMPTZ PRIMARY KEY, price REAL)""",
     """CREATE TABLE IF NOT EXISTS bot_stats (
         ts TIMESTAMPTZ PRIMARY KEY, total_trades INTEGER DEFAULT 0,

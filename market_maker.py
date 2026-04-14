@@ -17,6 +17,7 @@ import time
 import math
 import random
 import statistics
+import re
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, field
 from typing import Optional
@@ -74,6 +75,8 @@ class Config:
     MIN_ORDER_SHARES: float = field(default_factory=lambda: env_float("POLY_MIN_ORDER_SHARES", 5.0))
     MAX_ORDERS_PER_CYCLE: int = field(default_factory=lambda: env_int("POLY_MAX_ORDERS_PER_CYCLE", 20))
     CANCEL_BEFORE_REQUOTE: bool = field(default_factory=lambda: env_bool("POLY_CANCEL_BEFORE_REQUOTE", True))
+    ANCHOR_EVENT_HAZARD_PER_DAY: float = field(default_factory=lambda: env_float("POLY_ANCHOR_EVENT_HAZARD_PER_DAY", 0.001))
+    GTA_RELEASE_HAZARD_PER_DAY: float = field(default_factory=lambda: env_float("POLY_GTA_RELEASE_HAZARD_PER_DAY", 0.0002))
 
     # Risk
     MAX_DAILY_LOSS: float = 200.0  # Kill switch: stop if daily PnL < -$200
@@ -158,8 +161,8 @@ SQL_UPSERT_BTC_PRICE = """
         VALUES (%s, %s)
         ON CONFLICT (ts) DO UPDATE SET price = EXCLUDED.price
         """
-SQL_INSERT_QUOTE = """INSERT INTO quotes (ts,market_id,bid,ask,fair_price,mid,edge,placed)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"""
+SQL_INSERT_QUOTE = """INSERT INTO quotes (ts,market_id,bid,ask,fair_price,mid,edge,placed,model_type)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
 SQL_INSERT_TRADE = """INSERT INTO trades
            (ts,market_id,market_slug,event_slug,market_q,mode,side,price,size,notional_usdc,size_shares,order_id,status,pnl,fill_price)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
@@ -216,6 +219,7 @@ class Market:
     volume: float
     liquidity: float
     end_date_iso: str
+    rules_text: str
     active: bool
 
 @dataclass
@@ -451,12 +455,20 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
         return []
 
     results = []
+    skipped_unsupported = 0
     for m in markets_raw:
         q = m.get("question", "").lower()
         # Filter for BTC price prediction markets
         if "bitcoin" not in q and "btc" not in q:
             continue
         if not m.get("active"):
+            continue
+        rules_text = " ".join(
+            str(m.get(k, "") or "")
+            for k in ("description", "rules", "resolutionSource", "resolution")
+        )
+        if classify_market_model(m.get("question", ""), rules_text) == "unsupported":
+            skipped_unsupported += 1
             continue
 
         # Gamma API shape changed over time. Support both:
@@ -516,12 +528,15 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
             volume=float(m.get("volume", 0) or 0),
             liquidity=float(m.get("liquidity", 0) or 0),
             end_date_iso=m.get("endDate", ""),
+            rules_text=rules_text,
             active=True
         ))
 
     # Sort by volume, take top N
     results.sort(key=lambda x: x.volume, reverse=True)
     state.active_markets = results[:config.MARKETS_WATCHED]
+    if skipped_unsupported:
+        log.info(f"Skipped {skipped_unsupported} unsupported BTC market structures")
     return state.active_markets
 
 async def get_order_book_mid(session: aiohttp.ClientSession, token_id: str) -> Optional[float]:
@@ -548,7 +563,6 @@ def extract_strike_from_question(question: str) -> Optional[float]:
     "Will Bitcoin be above $90,000 on Dec 31?"
     "BTC above $95k by end of month?"
     """
-    import re
     # Match patterns like $90,000 or $95k or $90000
     patterns = [
         r'\$([0-9]{1,3}(?:,[0-9]{3})+)',  # $90,000
@@ -568,6 +582,73 @@ def extract_strike_from_question(question: str) -> Optional[float]:
                 mult = 1_000_000
             return float(val) * mult
     return None
+
+def has_explicit_time_cue(question: str) -> bool:
+    q = (question or "").lower()
+    if not q:
+        return False
+    month_names = (
+        "jan", "feb", "mar", "apr", "may", "jun",
+        "jul", "aug", "sep", "oct", "nov", "dec",
+    )
+    if any(m in q for m in month_names):
+        return True
+    if re.search(r"\b20[2-9][0-9]\b", q):
+        return True
+    time_phrases = ("by end", "end of", "this week", "this month", "this year", " by ", " on ")
+    return any(p in q for p in time_phrases)
+
+def classify_market_model(question: str, rules_text: str = "") -> str:
+    """
+    Supported models:
+      - terminal: price relation at expiry (above/below/close/settle)
+      - barrier: first-touch style (hit/reach/touch) with explicit time cue
+      - unsupported: everything else (including comparative-event questions)
+    """
+    q = (question or "").strip().lower()
+    rules = (rules_text or "").strip().lower()
+    if not q:
+        return "unsupported"
+
+    strike = extract_strike_from_question(question)
+    if strike is None:
+        return "unsupported"
+
+    terminal_patterns = (
+        r"\bbe above\b",
+        r"\bbe below\b",
+        r"\bclose above\b",
+        r"\bclose below\b",
+        r"\bsettle above\b",
+        r"\bsettle below\b",
+        r"\bover \$",
+        r"\bunder \$",
+        r"\bat or above\b",
+        r"\bat or below\b",
+    )
+    if any(re.search(pat, q) for pat in terminal_patterns):
+        return "terminal"
+
+    barrier_patterns = (
+        r"\bhit\b",
+        r"\bhits\b",
+        r"\breach\b",
+        r"\breaches\b",
+        r"\btouch\b",
+        r"\btouches\b",
+    )
+    has_barrier_verb = any(re.search(pat, q) for pat in barrier_patterns)
+    if has_barrier_verb:
+        if " before " in q and ("50-50" in rules or "50 50" in rules):
+            return "comparative_5050"
+        # Exclude comparative-event structures like "before GTA VI".
+        if " before " in q and not has_explicit_time_cue(q.replace(" before ", " ")):
+            return "unsupported"
+        if not has_explicit_time_cue(q):
+            return "unsupported"
+        return "barrier"
+
+    return "unsupported"
 
 def calc_fair_probability(btc_price: float, strike: float, days_to_expiry: float) -> float:
     """
@@ -593,6 +674,77 @@ def calc_fair_probability(btc_price: float, strike: float, days_to_expiry: float
 
     return norm_cdf(d2)
 
+def calc_barrier_hit_probability(btc_price: float, barrier: float, days_to_expiry: float) -> float:
+    """
+    Approximate first-touch probability under GBM with zero price drift.
+    Works for upper and lower barriers.
+    """
+    if barrier <= 0 or days_to_expiry <= 0 or btc_price <= 0:
+        return 0.5
+    if abs(barrier - btc_price) / btc_price < 1e-9:
+        return 1.0
+
+    sigma = 0.80
+    T = max(days_to_expiry / 365.0, 1e-6)
+    sigma_sqrt_t = sigma * math.sqrt(T)
+    if sigma_sqrt_t <= 0:
+        return 0.5
+
+    # Under dS/S = sigma dW, log-price drift is nu = -0.5*sigma^2.
+    nu = -0.5 * sigma * sigma
+
+    def norm_cdf(x: float) -> float:
+        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+    if barrier > btc_price:
+        a = math.log(barrier / btc_price)
+        z1 = (nu * T - a) / sigma_sqrt_t
+        z2 = (-nu * T - a) / sigma_sqrt_t
+        p = norm_cdf(z1) + math.exp((2.0 * nu * a) / (sigma * sigma)) * norm_cdf(z2)
+    else:
+        # Lower barrier via mirrored process -log(S_t).
+        a = math.log(btc_price / barrier)
+        nu_m = -nu
+        z1 = (nu_m * T - a) / sigma_sqrt_t
+        z2 = (-nu_m * T - a) / sigma_sqrt_t
+        p = norm_cdf(z1) + math.exp((2.0 * nu_m * a) / (sigma * sigma)) * norm_cdf(z2)
+
+    return max(0.0, min(1.0, p))
+
+def infer_anchor_event_hazard(question: str, rules_text: str) -> float:
+    q = (question or "").lower()
+    rules = (rules_text or "").lower()
+    if "gta vi" in q or "gta vi" in rules:
+        return max(1e-7, config.GTA_RELEASE_HAZARD_PER_DAY)
+    return max(1e-7, config.ANCHOR_EVENT_HAZARD_PER_DAY)
+
+def calc_comparative_5050_probability(
+    btc_price: float,
+    strike: float,
+    days_to_expiry: float,
+    question: str,
+    rules_text: str,
+) -> float:
+    """
+    For "A before B" markets with explicit 50-50 fallback if neither by deadline:
+      payout = P(A occurs before min(B, D)) + 0.5 * P(A>D and B>D)
+    We model A=BTC barrier hit using implied hazard from barrier probability,
+    and B (anchor event) as exponential hazard inferred from question/rules.
+    """
+    if days_to_expiry <= 0:
+        return 0.5
+
+    p_hit = calc_barrier_hit_probability(btc_price, strike, days_to_expiry)
+    T = max(days_to_expiry, 1e-6)
+    lambda_b = max(1e-9, -math.log(max(1e-9, 1.0 - p_hit)) / T)
+    lambda_g = infer_anchor_event_hazard(question, rules_text)
+
+    lam_sum = lambda_b + lambda_g
+    p_yes_before_deadline = (lambda_b / lam_sum) * (1.0 - math.exp(-lam_sum * T))
+    p_none = math.exp(-lam_sum * T)
+    fair = p_yes_before_deadline + 0.5 * p_none
+    return max(0.0, min(1.0, fair))
+
 def get_days_to_expiry(end_date_iso: str) -> float:
     """Calculate days until market expiry."""
     try:
@@ -613,6 +765,9 @@ async def compute_quote(session: aiohttp.ClientSession, market: Market) -> Optio
     btc = state.btc_price
     if btc <= 0:
         return None
+    model = classify_market_model(market.question, market.rules_text)
+    if model == "unsupported":
+        return None
 
     strike = extract_strike_from_question(market.question)
     if strike is None:
@@ -620,7 +775,18 @@ async def compute_quote(session: aiohttp.ClientSession, market: Market) -> Optio
         return None
 
     dte = get_days_to_expiry(market.end_date_iso)
-    fair = calc_fair_probability(btc, strike, dte)
+    if model == "barrier":
+        fair = calc_barrier_hit_probability(btc, strike, dte)
+    elif model == "comparative_5050":
+        fair = calc_comparative_5050_probability(
+            btc,
+            strike,
+            dte,
+            market.question,
+            market.rules_text,
+        )
+    else:
+        fair = calc_fair_probability(btc, strike, dte)
 
     # Clamp to valid range
     fair = max(0.02, min(0.98, fair))
@@ -663,7 +829,7 @@ async def compute_quote(session: aiohttp.ClientSession, market: Market) -> Optio
     db_write(
         SQL_INSERT_QUOTE,
         (utcnow(),
-         market.condition_id, bid, ask, fair, mid, edge, int(should_place))
+         market.condition_id, bid, ask, fair, mid, edge, int(should_place), model)
     )
 
     return q

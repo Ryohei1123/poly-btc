@@ -321,7 +321,7 @@
   /* ─── Quotes ─── */
   .quote-row {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr 1fr 50px;
+    grid-template-columns: 120px 1fr 1fr 1fr 1fr 50px;
     gap: 6px; align-items: center;
     padding: 7px 0;
     border-bottom: 1px solid rgba(29,45,69,0.4);
@@ -588,7 +588,7 @@
     </div>
     <div class="panel-body" style="padding:0 16px">
       <div class="quote-row" style="font-size:10px;color:var(--text3);font-family:var(--mono);border-bottom:1px solid var(--border);padding:6px 0">
-        <span>MARKET</span><span>FAIR</span><span>BID/ASK</span><span>EDGE</span><span>PLACED</span>
+        <span>MODEL</span><span>MARKET</span><span>FAIR</span><span>BID/ASK</span><span>EDGE</span><span>PLACED</span>
       </div>
       <div id="quotes-body">
         <div class="shimmer" style="margin:8px 0"></div>
@@ -915,8 +915,13 @@ async function loadHourly() {
 
 async function loadQuotes() {
   const data = await fetchJSON('/api/quotes/recent');
+  const modelLabel = (m) => {
+    if (m === 'comparative_5050') return 'comparative';
+    return m || 'terminal';
+  };
   el('quotes-body').innerHTML = data.map(q => `
     <div class="quote-row">
+      <span style="color:var(--purple)">${modelLabel(q.model_type)}</span>
       <span style="color:var(--text2);overflow:hidden;text-overflow:ellipsis">${truncate(q.market_id||'—', 16)}</span>
       <span style="color:var(--yellow)">${(+q.fair_price).toFixed(3)}</span>
       <span style="color:var(--blue)">${(+q.bid).toFixed(3)} / ${(+q.ask).toFixed(3)}</span>
