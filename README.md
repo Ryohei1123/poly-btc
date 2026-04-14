@@ -26,7 +26,16 @@ pip install -r requirements.txt
 export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/polybot
 ```
 
-### 3. Run in paper trading mode (no keys needed)
+### 3. Pick an environment file
+```bash
+# Balanced paper mode
+cp envs/paper-balanced.env .env
+
+# or lower-risk paper mode
+cp envs/paper-conservative.env .env
+```
+
+### 4. Run in paper trading mode (no keys needed)
 ```bash
 # Terminal 1 — start the bot
 python market_maker.py
@@ -40,18 +49,15 @@ Paper mode defaults:
 - `POLY_FORCE_PAPER=1` (enabled by default)
 - `POLY_PAPER_INITIAL_BALANCE=500` (starting paper equity)
 
-### 4. Configure for live trading
-Create a `.env` file:
+### 5. Configure for live trading
+Use the live template:
+```bash
+cp envs/live-template.env .env
 ```
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/polybot
-POLY_FORCE_PAPER=0
-POLY_EXECUTION_MODE=live
-POLY_ENABLE_LIVE_TRADING=1
-POLY_PRIVATE_KEY=0x_your_polygon_wallet_private_key
-POLY_API_KEY=your_clob_api_key
-POLY_API_SECRET=your_clob_api_secret
-POLY_PASSPHRASE=your_clob_passphrase
-```
+
+Then edit `.env` and set:
+- `POLY_ENABLE_LIVE_TRADING=1`
+- `POLY_PRIVATE_KEY`, `POLY_API_KEY`, `POLY_API_SECRET`, `POLY_PASSPHRASE`
 
 Get CLOB credentials from: https://docs.polymarket.com/developers/CLOB/authentication
 
@@ -159,7 +165,42 @@ Runtime env vars:
 
 ## Run 24/7 (Linux)
 
-Use `tmux` so bot and dashboard stay alive after you disconnect:
+### Recommended: systemd user services (auto-restart)
+
+```bash
+cd /root/works/poly-btc
+cp envs/paper-conservative.env .env
+bash scripts/install-systemd-user.sh
+```
+
+This starts both services (`polybot-bot` and `polybot-dashboard`) and enables restart-on-failure.
+
+Useful commands:
+
+```bash
+systemctl --user status polybot-bot.service
+systemctl --user status polybot-dashboard.service
+journalctl --user -u polybot-bot.service -f
+journalctl --user -u polybot-dashboard.service -f
+```
+
+Script shortcuts:
+
+```bash
+bash scripts/status-systemd-user.sh
+bash scripts/stop-systemd-user.sh
+bash scripts/start-systemd-user.sh
+```
+
+For true background operation after logout/reboot:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+### Alternative: tmux
+
+Use `tmux` if you do not want to use `systemd`:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y tmux
@@ -176,6 +217,15 @@ tmux new -d -s polydash 'python server.py'
 tmux ls
 tmux attach -t polybot
 ```
+
+### 7-day soak test checklist
+
+Run in paper mode for at least 1 week and verify:
+- no prolonged downtime/restart loops
+- kill switch does not trigger repeatedly
+- stable quote/ack/fill telemetry
+- inventory does not stay one-sided for long periods
+- drawdown stays within your risk limits
 
 ---
 

@@ -1,0 +1,20 @@
+[Unit]
+Description=PolyBot market maker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKDIR__
+EnvironmentFile=__WORKDIR__/.env
+ExecStart=__PYTHON__ __WORKDIR__/market_maker.py
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+NoNewPrivileges=true
+StandardOutput=append:__WORKDIR__/logs/systemd-bot.out.log
+StandardError=append:__WORKDIR__/logs/systemd-bot.err.log
+
+[Install]
+WantedBy=default.target
