@@ -1,13 +1,13 @@
 """
 Polymarket Bot Dashboard — Backend API
-Serves real-time stats from the PostgreSQL database.
-Run: python server.py
-Access: http://localhost:5050
+Hybrid data: Gamma/Binance market snapshots plus PostgreSQL bot tables when active
+(POLY_DASHBOARD_DATA_SOURCE=auto|db|gamma). Run: python server.py — http://localhost:5050
 """
 
 import os
 import json
 import time
+from typing import Optional
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
@@ -28,6 +28,38 @@ def env_float(name: str, default: float) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return default
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _live_credentials_configured() -> bool:
+    return all(
+        (os.getenv(k) or "").strip()
+        for k in ("POLY_PRIVATE_KEY", "POLY_API_KEY", "POLY_API_SECRET", "POLY_PASSPHRASE")
+    )
+
+
+def _execution_env_flags() -> dict:
+    force_paper = env_bool("POLY_FORCE_PAPER", True)
+    mode = (os.getenv("POLY_EXECUTION_MODE", "paper") or "paper").strip().lower()
+    if mode not in ("paper", "live"):
+        mode = "paper"
+    armed = env_bool("POLY_ENABLE_LIVE_TRADING", False)
+    creds = _live_credentials_configured()
+    return {
+        "execution_mode": mode,
+        "force_paper": force_paper,
+        "enable_live_trading": armed,
+        "live_credentials_configured": creds,
+        "env_ready_for_live_orders": (
+            (not force_paper) and mode == "live" and armed and creds
+        ),
+    }
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/polybot")
 DEFAULT_STATIC_DIR = Path(__file__).parent / "static"
@@ -254,6 +286,231 @@ def _safe_float(value, default=0.0) -> float:
     except (TypeError, ValueError):
         return float(default)
 
+
+def _bot_log_file_path() -> Optional[Path]:
+    """Path to today's bot log from market_maker.py, or explicit POLY_DASHBOARD_BOT_LOG."""
+    raw = (os.getenv("POLY_DASHBOARD_BOT_LOG") or "").strip()
+    if raw:
+        p = Path(raw).expanduser()
+        return p if p.is_file() else None
+    log_dir = Path(__file__).resolve().parent / "logs"
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
+    candidate = log_dir / f"bot_{day}.log"
+    return candidate if candidate.is_file() else None
+
+
+def _tail_text_file(path: Path, max_lines: int) -> list[str]:
+    """Read the last max_lines lines without loading the whole file."""
+    if max_lines <= 0:
+        return []
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            block = 8192
+            data = b""
+            nl_count = 0
+            while size > 0 and nl_count <= max_lines + 1:
+                read_sz = min(block, size)
+                size -= read_sz
+                f.seek(size)
+                data = f.read(read_sz) + data
+                nl_count = data.count(b"\n")
+        text = data.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        return lines[-max_lines:]
+    except OSError:
+        return []
+
+
+def _synthetic_dashboard_log_lines() -> list[str]:
+    markets = get_live_btc_markets()
+    top = markets[0] if markets else None
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    lines = [
+        f"{now} [INFO] LIVE_DATA source=gamma+binance btc_markets={len(markets)}",
+    ]
+    if top:
+        lines.append(
+            f"{now} [INFO] TOP_MARKET yes={top['yes_price']*100:.2f}c "
+            f"no={top['no_price']*100:.2f}c volume=${top['volume']:.0f} q={top['question'][:80]}"
+        )
+    return lines
+
+
+def _dashboard_mode_raw() -> str:
+    raw = (os.getenv("POLY_DASHBOARD_DATA_SOURCE", "auto") or "auto").strip().lower()
+    return raw if raw in ("auto", "db", "gamma") else "auto"
+
+
+def _db_has_recent_bot_activity(con) -> bool:
+    try:
+        r1 = con.execute(
+            "SELECT 1 AS x FROM trades WHERE ts > NOW() - INTERVAL '72 hours' LIMIT 1"
+        ).fetchone()
+        if r1:
+            return True
+        r2 = con.execute(
+            "SELECT 1 AS x FROM bot_stats WHERE ts > NOW() - INTERVAL '72 hours' LIMIT 1"
+        ).fetchone()
+        return bool(r2)
+    except Exception:
+        return False
+
+
+def dashboard_uses_bot_db(con) -> bool:
+    """Use PostgreSQL bot tables for dashboard panels (auto if recent bot rows exist)."""
+    mode = _dashboard_mode_raw()
+    if mode == "gamma":
+        return False
+    if mode == "db":
+        return True
+    return _db_has_recent_bot_activity(con)
+
+
+def _wrap_rows(rows: list, source: str) -> dict:
+    return {"rows": rows, "source": source}
+
+
+def _summary_from_db(con, markets: list, btc_price: float) -> dict:
+    stats = con.execute(
+        "SELECT realized_pnl, balance, total_trades, active_markets, daily_pnl "
+        "FROM bot_stats ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+    agg = con.execute(
+        """SELECT
+            COALESCE(SUM(COALESCE(notional_usdc, size, 0)), 0) AS vol,
+            COUNT(*) FILTER (WHERE status = 'filled') AS n_filled,
+            COUNT(*) FILTER (WHERE status = 'filled' AND pnl > 0) AS n_wins
+        FROM trades"""
+    ).fetchone()
+    dm = con.execute(
+        "SELECT COUNT(DISTINCT market_id) AS c FROM trades WHERE ts > NOW() - INTERVAL '24 hours'"
+    ).fetchone()
+    n_filled = int(agg["n_filled"] or 0) if agg else 0
+    n_wins = int(agg["n_wins"] or 0) if agg else 0
+    win_rate = (n_wins / n_filled * 100.0) if n_filled else 0.0
+    distinct_24h = int(dm["c"] or 0) if dm else 0
+    top = markets[0] if markets else None
+    return {
+        "dashboard_data_source": "db",
+        "btc_price": round(btc_price, 2),
+        "top_market_question": top["question"] if top else "",
+        "top_market_yes_cents": round((top["yes_price"] if top else 0.0) * 100.0, 2),
+        "top_market_volume": round(top["volume"], 2) if top else 0.0,
+        "bot_realized_pnl": float(stats["realized_pnl"] or 0) if stats else 0.0,
+        "bot_balance": float(stats["balance"] or 0) if stats else 0.0,
+        "bot_daily_pnl": float(stats["daily_pnl"] or 0) if stats else 0.0,
+        "bot_total_trades": int(stats["total_trades"] or 0) if stats else 0,
+        "bot_fill_volume": float(agg["vol"] or 0) if agg else 0.0,
+        "bot_filled_count": n_filled,
+        "bot_win_rate_pct": round(win_rate, 1),
+        "bot_distinct_markets_24h": distinct_24h,
+    }
+
+
+def _pnl_curve_from_db(con) -> list[dict]:
+    rows = con.execute(SQL_PNL_CURVE).fetchall()
+    rows = list(reversed(rows or []))
+    out = []
+    for r in rows:
+        ts = r.get("ts")
+        label = fmt_ts(ts) if ts is not None else "—"
+        out.append({"label": label, "value": round(float(r.get("realized_pnl") or 0), 2)})
+    return out
+
+
+def _btc_from_db(con) -> list[dict]:
+    rows = con.execute(SQL_BTC_HISTORY).fetchall()
+    rows = list(reversed(rows or []))
+    out = []
+    for r in rows:
+        ts = r.get("ts")
+        label = fmt_ts(ts) if ts is not None else "—"
+        out.append({"ts": label, "price": float(r.get("price") or 0)})
+    return out
+
+
+def _recent_trades_from_db(con) -> list[dict]:
+    rows = con.execute(SQL_RECENT_TRADES).fetchall() or []
+    out = []
+    for r in rows:
+        price = float(r.get("price") or 0)
+        slug = (r.get("market_slug") or "").strip()
+        ev = (r.get("event_slug") or "").strip()
+        url = market_url_from_slugs(slug, ev)
+        notional = r.get("notional_usdc")
+        if notional is None:
+            notional = r.get("size")
+        out.append(
+            {
+                "ts": fmt_ts(r.get("ts")),
+                "market_q": r.get("market_q") or "",
+                "side": (r.get("side") or "").upper(),
+                "price": price,
+                "price_cents": round(price * 100.0, 2),
+                "status": r.get("status") or "",
+                "mode": r.get("mode") or "",
+                "volume_usd": round(float(notional or 0), 2),
+                "pnl": round(float(r.get("pnl") or 0), 4),
+                "size_shares": float(r.get("size_shares") or 0),
+                "market_url": url,
+            }
+        )
+    return out
+
+
+def _market_breakdown_from_db(con) -> list[dict]:
+    rows = con.execute(SQL_MARKET_BREAKDOWN).fetchall() or []
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "market_q": r.get("market_q") or "",
+                "volume": round(float(r.get("volume") or 0), 2),
+                "total_pnl": round(float(r.get("total_pnl") or 0), 2),
+                "cnt": int(r.get("cnt") or 0),
+                "yes_cents": round(float(r.get("avg_price") or 0) * 100.0, 2),
+            }
+        )
+    return out
+
+
+def _quotes_from_db(con) -> list[dict]:
+    rows = con.execute(SQL_RECENT_QUOTES).fetchall() or []
+    out = []
+    for r in rows:
+        mid = float(r.get("mid") or 0)
+        edge = float(r.get("edge") or 0)
+        out.append(
+            {
+                "model_type": r.get("model_type") or "terminal",
+                "market_id": (r.get("market_id") or "")[:28],
+                "fair_price": float(r.get("fair_price") or 0),
+                "bid": float(r.get("bid") or 0),
+                "ask": float(r.get("ask") or 0),
+                "edge": edge,
+                "placed": int(r.get("placed") or 0),
+                "mid": mid,
+                "spread": abs(float(r.get("ask") or 0) - float(r.get("bid") or 0)),
+            }
+        )
+    return out
+
+
+def _hourly_pnl_from_db(con) -> list[dict]:
+    rows = con.execute(SQL_HOURLY_PNL).fetchall() or []
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "hour": r.get("hour") or "—",
+                "trades": int(r.get("trades") or 0),
+                "pnl": round(float(r.get("pnl") or 0), 2),
+            }
+        )
+    return out
+
 def _parse_list_field(raw):
     if isinstance(raw, list):
         return raw
@@ -425,6 +682,16 @@ def summary():
     btc_hist = get_live_btc_history()
     btc_price = btc_hist[-1]["price"] if btc_hist else 0.0
 
+    try:
+        con = get_db()
+        use_db = dashboard_uses_bot_db(con)
+    except Exception:
+        con = None
+        use_db = False
+
+    if use_db and con is not None:
+        return jsonify(_summary_from_db(con, markets, btc_price))
+
     active_markets = len(markets)
     total_volume = sum(m["volume"] for m in markets)
     avg_yes = (sum(m["yes_price"] for m in markets) / active_markets) if active_markets else 0.0
@@ -433,6 +700,7 @@ def summary():
     top = markets[0] if markets else None
 
     return jsonify({
+        "dashboard_data_source": "gamma",
         "active_markets": active_markets,
         "total_market_volume": round(total_volume, 2),
         "avg_yes_cents": round(avg_yes * 100.0, 2),
@@ -452,14 +720,52 @@ def status():
     market_age = max(0.0, now - float(LIVE_CACHE["markets"]["ts"]))
     btc_age = max(0.0, now - float(LIVE_CACHE["btc_history"]["ts"]))
     healthy = bool(markets) and bool(btc_hist)
+
+    env_flags = _execution_env_flags()
+    bot_running = False
+    bot_stale = True
+    kill_switch = False
+    paper_mode = True
+    runtime_updated_at = None
+    try:
+        con = get_db()
+        row = con.execute(
+            "SELECT running, kill_switch, paper_mode, updated_at FROM runtime_state WHERE id=1"
+        ).fetchone()
+        if row:
+            bot_running = bool(int(row["running"] or 0))
+            kill_switch = bool(int(row["kill_switch"] or 0))
+            paper_mode = bool(int(row["paper_mode"] or 1))
+            u = row.get("updated_at")
+            if isinstance(u, datetime):
+                if u.tzinfo is None:
+                    u = u.replace(tzinfo=timezone.utc)
+                bot_stale = (datetime.now(timezone.utc) - u).total_seconds() > 120.0
+                runtime_updated_at = u.isoformat()
+            else:
+                bot_stale = True
+    except Exception:
+        bot_running = False
+        bot_stale = True
+        kill_switch = False
+        paper_mode = True
+
+    bot_connected = bot_running and not bot_stale
+    if not bot_connected:
+        paper_mode = True
+
     return jsonify({
-        "running": True,
+        "running": bot_connected,
         "healthy": healthy,
-        "paper_mode": False,
+        "paper_mode": paper_mode,
+        "kill_switch": kill_switch,
+        "bot_connected": bot_connected,
+        "runtime_updated_at": runtime_updated_at,
         "source": "LIVE_MARKET",
         "market_count": len(markets),
         "market_age_sec": round(market_age, 1),
         "btc_age_sec": round(btc_age, 1),
+        **env_flags,
     })
 
 @app.route("/api/execution_telemetry")
@@ -515,17 +821,31 @@ def execution_telemetry():
 
 @app.route("/api/pnl_curve")
 def pnl_curve():
+    try:
+        con = get_db()
+        if dashboard_uses_bot_db(con):
+            return jsonify(_wrap_rows(_pnl_curve_from_db(con), "db"))
+    except Exception:
+        pass
     markets = get_live_btc_markets()[:20]
-    return jsonify([
+    rows = [
         {
             "label": (m["question"][:22] + "…") if len(m["question"]) > 22 else m["question"],
             "value": round(m["volume"], 2),
         }
         for m in markets
-    ])
+    ]
+    return jsonify(_wrap_rows(rows, "gamma"))
+
 
 @app.route("/api/trades/recent")
 def recent_trades():
+    try:
+        con = get_db()
+        if dashboard_uses_bot_db(con):
+            return jsonify(_wrap_rows(_recent_trades_from_db(con), "db"))
+    except Exception:
+        pass
     markets = get_live_btc_markets()[:75]
     out = []
     for m in markets:
@@ -540,12 +860,19 @@ def recent_trades():
             "change_24h_pct": round(m["one_day_change_pct"], 2),
             "market_url": m["market_url"],
         })
-    return jsonify(out)
+    return jsonify(_wrap_rows(out, "gamma"))
+
 
 @app.route("/api/trades/markets")
 def market_breakdown():
+    try:
+        con = get_db()
+        if dashboard_uses_bot_db(con):
+            return jsonify(_wrap_rows(_market_breakdown_from_db(con), "db"))
+    except Exception:
+        pass
     markets = get_live_btc_markets()[:12]
-    return jsonify([
+    rows = [
         {
             "market_q": m["question"],
             "volume": round(m["volume"], 2),
@@ -553,16 +880,31 @@ def market_breakdown():
             "no_cents": round(m["no_price"] * 100.0, 2),
         }
         for m in markets
-    ])
+    ]
+    return jsonify(_wrap_rows(rows, "gamma"))
+
 
 @app.route("/api/btc")
 def btc_history():
-    return jsonify(get_live_btc_history())
+    try:
+        con = get_db()
+        if dashboard_uses_bot_db(con):
+            return jsonify(_wrap_rows(_btc_from_db(con), "db"))
+    except Exception:
+        pass
+    return jsonify(_wrap_rows(get_live_btc_history(), "gamma"))
+
 
 @app.route("/api/quotes/recent")
 def recent_quotes():
+    try:
+        con = get_db()
+        if dashboard_uses_bot_db(con):
+            return jsonify(_wrap_rows(_quotes_from_db(con), "db"))
+    except Exception:
+        pass
     markets = get_live_btc_markets()[:30]
-    return jsonify([
+    rows = [
         {
             "model_type": "live",
             "market_id": m["market_slug"] or m["event_slug"] or m["question"][:24],
@@ -573,34 +915,52 @@ def recent_quotes():
             "placed": 1 if m["best_bid"] > 0 and m["best_ask"] > 0 else 0,
         }
         for m in markets
-    ])
+    ]
+    return jsonify(_wrap_rows(rows, "gamma"))
+
 
 @app.route("/api/hourly_pnl")
 def hourly_pnl():
+    try:
+        con = get_db()
+        if dashboard_uses_bot_db(con):
+            return jsonify(_wrap_rows(_hourly_pnl_from_db(con), "db"))
+    except Exception:
+        pass
     markets = get_live_btc_markets()[:24]
-    return jsonify([
+    rows = [
         {
             "hour": (m["question"][:10] + "…") if len(m["question"]) > 10 else m["question"],
             "trades": 0,
             "pnl": round(m["one_day_change_pct"], 2),
         }
         for m in markets
-    ])
+    ]
+    return jsonify(_wrap_rows(rows, "gamma"))
 
 @app.route("/api/logs")
 def get_logs():
-    markets = get_live_btc_markets()
-    top = markets[0] if markets else None
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    lines = [
-        f"{now} [INFO] LIVE_DATA source=gamma+binance btc_markets={len(markets)}",
-    ]
-    if top:
-        lines.append(
-            f"{now} [INFO] TOP_MARKET yes={top['yes_price']*100:.2f}c "
-            f"no={top['no_price']*100:.2f}c volume=${top['volume']:.0f} q={top['question'][:80]}"
-        )
-    return jsonify({"lines": lines})
+    """
+    Prefer tailing market_maker.py log (poly-btc/logs/bot_YYYYMMDD.log) so live runs
+    are visible on the dashboard. Set POLY_DASHBOARD_SYNTH_LOGS=1 to force the old
+    synthetic Gamma-only stub lines.
+    """
+    if env_bool("POLY_DASHBOARD_SYNTH_LOGS", False):
+        return jsonify({"lines": _synthetic_dashboard_log_lines(), "source": "synthetic"})
+
+    try:
+        max_lines = int(os.getenv("POLY_DASHBOARD_LOG_LINES", "120") or "120")
+    except (TypeError, ValueError):
+        max_lines = 120
+    max_lines = max(20, min(max_lines, 500))
+
+    log_path = _bot_log_file_path()
+    if log_path:
+        tailed = _tail_text_file(log_path, max_lines)
+        if tailed:
+            return jsonify({"lines": tailed, "source": str(log_path.name)})
+
+    return jsonify({"lines": _synthetic_dashboard_log_lines(), "source": "synthetic"})
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")

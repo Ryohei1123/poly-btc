@@ -470,13 +470,13 @@
   <!-- Stats -->
   <div class="stats-grid">
     <div class="stat-card" style="--accent:var(--green)">
-      <div class="stat-label">Total Market Volume</div>
+      <div class="stat-label" id="stat-lbl-a">Total Market Volume</div>
       <div class="stat-value" id="stat-pnl">$—</div>
       <div class="stat-sub" id="stat-pnl-sub">Loading…</div>
       <div class="stat-icon">💰</div>
     </div>
     <div class="stat-card" style="--accent:var(--blue)">
-      <div class="stat-label">Active BTC Markets</div>
+      <div class="stat-label" id="stat-lbl-b">Active BTC Markets</div>
       <div class="stat-value" id="stat-trades">—</div>
       <div class="stat-sub" id="stat-trades-sub">Loading…</div>
       <div class="stat-icon">⚡</div>
@@ -488,7 +488,7 @@
       <div class="stat-icon">📅</div>
     </div>
     <div class="stat-card" style="--accent:var(--purple)">
-      <div class="stat-label">YES >= 50%</div>
+      <div class="stat-label" id="stat-lbl-d">YES >= 50%</div>
       <div class="stat-value" id="stat-wr">—%</div>
       <div class="stat-sub" id="stat-wr-sub">Market breadth</div>
       <div class="stat-icon">🎯</div>
@@ -499,7 +499,7 @@
   <div class="charts-row">
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Top BTC Market Volumes</span>
+        <span class="panel-title" id="pnl-panel-title">Top BTC Market Volumes</span>
         <span class="panel-badge" id="pnl-badge">LIVE</span>
       </div>
       <div class="panel-body">
@@ -522,13 +522,13 @@
     <!-- Live Markets -->
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Live Market Snapshot</span>
+        <span class="panel-title" id="trades-panel-title">Live Market Snapshot</span>
         <span class="panel-badge" id="trades-badge">—</span>
       </div>
       <div class="panel-body" style="padding:0">
         <div class="table-scroll">
           <table class="trade-table">
-            <thead>
+            <thead id="trade-table-head">
               <tr>
                 <th>Time</th>
                 <th>Market</th>
@@ -552,7 +552,7 @@
     <!-- Market Volume Breakdown -->
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Market Volume Breakdown</span>
+        <span class="panel-title" id="markets-panel-title">Market Volume Breakdown</span>
       </div>
       <div class="panel-body">
         <div id="markets-breakdown">
@@ -567,7 +567,7 @@
     <div style="display:flex;flex-direction:column;gap:14px;">
       <div class="panel" style="flex:1">
         <div class="panel-header">
-          <span class="panel-title">24h Change by Market (%)</span>
+          <span class="panel-title" id="hourly-panel-title">24h Change by Market (%)</span>
         </div>
         <div class="panel-body">
           <div class="chart-wrap" style="height:160px"><canvas id="hourly-chart"></canvas></div>
@@ -609,7 +609,7 @@
     </div>
     <div class="panel-body" style="padding:0 16px">
       <div class="quote-row" style="font-size:10px;color:var(--text3);font-family:var(--mono);border-bottom:1px solid var(--border);padding:6px 0">
-        <span>SRC</span><span>MARKET</span><span>YES</span><span>BID/ASK</span><span>SPREAD</span><span>BOOK</span>
+        <span>SRC</span><span>MARKET</span><span>FAIR</span><span>BID/ASK</span><span id="quotes-h-edge">EDGE</span><span>BOOK</span>
       </div>
       <div id="quotes-body">
         <div class="shimmer" style="margin:8px 0"></div>
@@ -626,7 +626,33 @@ let autoRefreshOn = true;
 let autoTimer;
 let prevOrdersPlaced = null;
 let prevLatencyMs = null;
+let dashboardSource = 'gamma';
 const el = id => document.getElementById(id);
+
+function unwrapRows(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.rows)) return payload.rows;
+  return [];
+}
+
+function payloadSource(payload, fallback = 'gamma') {
+  if (payload && typeof payload.source === 'string') return payload.source;
+  return fallback;
+}
+
+function applyDashboardChrome() {
+  const db = dashboardSource === 'db';
+  const pnlT = el('pnl-panel-title');
+  const trT = el('trades-panel-title');
+  const mkT = el('markets-panel-title');
+  const hrT = el('hourly-panel-title');
+  const qe = el('quotes-h-edge');
+  if (pnlT) pnlT.textContent = db ? 'Realized PnL (bot snapshots)' : 'Top BTC Market Volumes';
+  if (trT) trT.textContent = db ? 'Recent bot orders' : 'Live Market Snapshot';
+  if (mkT) mkT.textContent = db ? 'PnL by market (filled)' : 'Market Volume Breakdown';
+  if (hrT) hrT.textContent = db ? 'Hourly realized PnL ($)' : '24h Change by Market (%)';
+  if (qe) qe.textContent = 'EDGE';
+}
 
 const CHART_DEFAULTS = {
   borderWidth: 2,
@@ -715,14 +741,14 @@ function initBtcChart(labels, values) {
 }
 
 // ─── Hourly Chart ─────────────────────────────────────────────────────────────
-function initHourlyChart(labels, values) {
+function initHourlyChart(labels, values, isDollars = false) {
   const ctx = document.getElementById('hourly-chart').getContext('2d');
   hourlyChart = new Chart(ctx, {
     type: 'bar',
     data: {
       labels,
       datasets: [{
-        label: 'PnL',
+        label: isDollars ? 'PnL ($)' : 'Change %',
         data: values,
         backgroundColor: values.map(v => v >= 0 ? 'rgba(0,229,160,0.6)' : 'rgba(255,77,106,0.6)'),
         borderColor: values.map(v => v >= 0 ? '#00e5a0' : '#ff4d6a'),
@@ -733,14 +759,26 @@ function initHourlyChart(labels, values) {
       responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false }, tooltip: {
         backgroundColor:'#0d1420', borderColor:'#1d2d45', borderWidth:1,
-        callbacks: { label: ctx => ' ' + ctx.raw.toFixed(2) + '%' }
+        callbacks: {
+          label: ctx => isDollars
+            ? (' $' + fmtNum(ctx.raw, 2))
+            : (' ' + ctx.raw.toFixed(2) + '%'),
+        }
       }},
       scales: {
         x: { ticks: { color:'#3d5270', maxTicksLimit:6, font:{family:'JetBrains Mono',size:9} }, grid: { color:'#1d2d45' } },
-        y: { ticks: { color:'#3d5270', font:{family:'JetBrains Mono',size:9}, callback: v => v + '%' }, grid: { color:'#1d2d45' } }
+        y: {
+          ticks: {
+            color:'#3d5270',
+            font:{family:'JetBrains Mono',size:9},
+            callback: v => (isDollars ? ('$' + fmtNum(v, 0)) : (v + '%')),
+          },
+          grid: { color:'#1d2d45' },
+        }
       }
     }
   });
+  hourlyChart._polyDollars = isDollars;
 }
 
 function updateChart(chart, labels, data) {
@@ -791,13 +829,41 @@ async function loadStatus() {
   const dot = statusPill.querySelector('.dot');
   const wsDot = wsPill.querySelector('.dot');
 
-  modeLabel.textContent = 'LIVE MARKET DATA';
-  modeLabel.style.color = 'var(--green)';
+  const feedOk = !!d.healthy;
+  const botOn = !!d.bot_connected;
+  const paper = !!d.paper_mode;
+  const halted = !!d.kill_switch;
+  const envLive = !!d.env_ready_for_live_orders;
 
-  if (!d.running || !d.healthy) {
-    applyPillTheme(statusPill, dot, statusText, 'DEGRADED', 'yellow');
+  if (!feedOk) {
+    modeLabel.textContent = 'Market data degraded · check Gamma / Binance';
+    modeLabel.style.color = 'var(--yellow)';
+  } else if (halted) {
+    modeLabel.textContent = 'Kill switch · orders halted · Polymarket + Binance';
+    modeLabel.style.color = 'var(--red)';
+  } else if (!botOn) {
+    modeLabel.textContent = envLive
+      ? 'Market data live · start market_maker.py to run CLOB orders (live .env)'
+      : 'Market data live · bot offline or stale (paper simulation when running)';
+    modeLabel.style.color = envLive ? 'var(--yellow)' : 'var(--text3)';
+  } else if (paper) {
+    modeLabel.textContent = 'PAPER trading (simulated fills) · Polymarket + Binance';
+    modeLabel.style.color = 'var(--yellow)';
   } else {
-    applyPillTheme(statusPill, dot, statusText, 'LIVE', 'green');
+    modeLabel.textContent = 'LIVE CLOB orders · real capital at risk · Polymarket + Binance';
+    modeLabel.style.color = 'var(--red)';
+  }
+
+  if (halted) {
+    applyPillTheme(statusPill, dot, statusText, 'HALTED', 'red');
+  } else if (!feedOk) {
+    applyPillTheme(statusPill, dot, statusText, 'DATA ISSUE', 'yellow');
+  } else if (!botOn) {
+    applyPillTheme(statusPill, dot, statusText, 'NO BOT', 'yellow');
+  } else if (paper) {
+    applyPillTheme(statusPill, dot, statusText, 'PAPER', 'yellow');
+  } else {
+    applyPillTheme(statusPill, dot, statusText, 'LIVE $', 'red');
   }
 
   applyPillTheme(wsPill, wsDot, wsText, 'GAMMA + BINANCE', 'blue');
@@ -808,10 +874,52 @@ async function loadStatus() {
 
 async function loadSummary() {
   const d = await fetchJSON('/api/summary');
+  dashboardSource = d.dashboard_data_source === 'db' ? 'db' : 'gamma';
+
+  const btcPrice = Number(d.btc_price || 0);
+  el('btc-badge').textContent = 'BTC $' + fmtNum(btcPrice, 0);
+  el('btc-badge2').textContent = '$' + fmtNum(btcPrice, 0);
+
+  if (dashboardSource === 'db') {
+    el('stat-lbl-a').textContent = 'Cumulative fill volume';
+    el('stat-lbl-b').textContent = 'Distinct markets (24h)';
+    el('stat-lbl-c').textContent = 'Snapshot balance';
+    el('stat-lbl-d').textContent = 'Filled win rate';
+
+    const fillVol = Number(d.bot_fill_volume || 0);
+    const realized = Number(d.bot_realized_pnl || 0);
+    el('stat-pnl').textContent = '$' + fmtNum(fillVol, 0);
+    el('stat-pnl').style.color = realized >= 0 ? 'var(--green)' : 'var(--red)';
+    el('stat-pnl-sub').textContent = `Realized ${fmtPnl(realized)} · ${Number(d.bot_filled_count || 0)} fills`;
+
+    el('stat-trades').textContent = String(Number(d.bot_distinct_markets_24h || 0));
+    el('stat-trades-sub').textContent = `Bot trades (all time): ${Number(d.bot_total_trades || 0)}`;
+
+    const bal = Number(d.bot_balance || 0);
+    el('stat-daily').textContent = '$' + fmtNum(bal, 0);
+    el('stat-daily').style.color = 'var(--yellow)';
+    el('stat-daily-sub').textContent = `Daily PnL ${fmtPnl(Number(d.bot_daily_pnl || 0))}`;
+
+    const wr = Number(d.bot_win_rate_pct || 0);
+    el('stat-wr').textContent = wr.toFixed(1) + '%';
+    el('stat-wr-sub').textContent = `${Number(d.bot_filled_count || 0)} filled trades in DB`;
+
+    el('trades-badge').textContent = 'PostgreSQL';
+    const pct = Math.max(0, Math.min(100, wr));
+    el('ring-pct').textContent = pct.toFixed(1) + '%';
+    const circ = 2 * Math.PI * 36;
+    el('ring-circle').setAttribute('stroke-dashoffset', circ * (1 - pct / 100));
+    return;
+  }
+
+  el('stat-lbl-a').textContent = 'Total Market Volume';
+  el('stat-lbl-b').textContent = 'Active BTC Markets';
+  el('stat-lbl-c').textContent = 'Volume-Weighted YES';
+  el('stat-lbl-d').textContent = 'YES >= 50%';
+
   const totalVolume = Number(d.total_market_volume || 0);
   const weightedYesCents = Number(d.weighted_yes_cents || 0);
   const breadthPct = Number(d.yes_ge_50_pct || 0);
-  const btcPrice = Number(d.btc_price || 0);
   const activeMarkets = Number(d.active_markets || 0);
   const topMarket = d.top_market_question || '—';
   const topYesCents = Number(d.top_market_yes_cents || 0);
@@ -826,22 +934,19 @@ async function loadSummary() {
   el('stat-daily').style.color = 'var(--yellow)';
   el('stat-wr').textContent = breadthPct.toFixed(1) + '%';
   el('stat-wr-sub').textContent = `${activeMarkets} active BTC markets`;
-  el('btc-badge').textContent = 'BTC $' + fmtNum(btcPrice, 0);
-  el('btc-badge2').textContent = '$' + fmtNum(btcPrice, 0);
   el('trades-badge').textContent = activeMarkets + ' live';
 
-  // Ring
   const pct = breadthPct;
   el('ring-pct').textContent = pct + '%';
   const circ = 2 * Math.PI * 36;
-  el('ring-circle').setAttribute('stroke-dashoffset', circ * (1 - pct/100));
+  el('ring-circle').setAttribute('stroke-dashoffset', circ * (1 - pct / 100));
 }
 
 async function loadPnlCurve() {
-  const data = await fetchJSON('/api/pnl_curve');
+  const raw = await fetchJSON('/api/pnl_curve');
+  const data = unwrapRows(raw);
   if (!data.length) {
     if (pnlChart) updateChart(pnlChart, [], []);
-    el('pnl-badge').textContent = 'LIVE';
     return;
   }
   const labels = data.map(d => truncate(d.label || '—', 10));
@@ -849,22 +954,69 @@ async function loadPnlCurve() {
   if (!pnlChart) initPnlChart(labels, values);
   else updateChart(pnlChart, labels, values);
   const total = values.reduce((a, b) => a + b, 0);
-  el('pnl-badge').textContent = '$' + fmtNum(total || 0, 0);
+  if (payloadSource(raw, 'gamma') === 'db') {
+    const last = values.length ? values[values.length - 1] : 0;
+    el('pnl-badge').textContent = 'DB · $' + fmtNum(last, 0);
+  } else {
+    el('pnl-badge').textContent = '$' + fmtNum(total || 0, 0);
+  }
 }
 
 async function loadBtc() {
-  const data = await fetchJSON('/api/btc');
-  const labels = data.map(d => d.ts.slice(11,16));
+  const raw = await fetchJSON('/api/btc');
+  const data = unwrapRows(raw);
+  const labels = data.map(d => (d.ts && d.ts.length >= 16) ? d.ts.slice(11, 16) : (d.ts || '—'));
   const values = data.map(d => d.price);
   if (!btcChart) initBtcChart(labels, values);
   else updateChart(btcChart, labels, values);
 }
 
+function setTradesTableHead(isBot) {
+  const thead = el('trade-table-head');
+  if (!thead) return;
+  if (isBot) {
+    thead.innerHTML = `<tr>
+      <th>Time</th><th>Market</th><th>Side</th><th>Price</th><th>Status</th>
+      <th>Notional</th><th>PnL</th><th>Mode</th><th>URL</th>
+    </tr>`;
+  } else {
+    thead.innerHTML = `<tr>
+      <th>Time</th><th>Market</th><th>YES</th><th>NO</th><th>MID</th>
+      <th>Spread</th><th>Volume</th><th>24h</th><th>Market URL</th>
+    </tr>`;
+  }
+}
+
 async function loadTrades() {
-  const data = await fetchJSON('/api/trades/recent');
+  const raw = await fetchJSON('/api/trades/recent');
+  const data = unwrapRows(raw);
+  const src = payloadSource(raw, 'gamma');
   const tbody = el('trades-body');
+  const isBot = src === 'db';
+  setTradesTableHead(isBot);
   if (!data.length) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">No live markets found</td></tr>';
+    tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">${
+      isBot ? 'No rows in trades table' : 'No live markets found'
+    }</td></tr>`;
+    return;
+  }
+  if (isBot) {
+    tbody.innerHTML = data.map(t => `
+    <tr>
+      <td>${fmtTime(t.ts)}</td>
+      <td title="${t.market_q||''}">${truncate(t.market_q||'—', 26)}</td>
+      <td style="color:var(--yellow)">${t.side||'—'}</td>
+      <td>${(+t.price_cents).toFixed(2)}c</td>
+      <td style="font-family:var(--mono);font-size:11px">${t.status||'—'}</td>
+      <td>$${fmtNum(+t.volume_usd, 0)}</td>
+      <td class="${(+t.pnl)>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(+t.pnl)}</td>
+      <td style="color:var(--text3);font-size:11px">${t.mode||'—'}</td>
+      <td>${
+        t.market_url
+          ? `<a href="${t.market_url}" target="_blank" rel="noopener noreferrer" style="color:var(--green);text-decoration:none">${truncate(t.market_url.replace('https://',''), 28)}</a>`
+          : '<span style="color:var(--text3)">—</span>'
+      }</td>
+    </tr>`).join('');
     return;
   }
   tbody.innerHTML = data.map(t => `
@@ -890,10 +1042,29 @@ async function loadTrades() {
 }
 
 async function loadMarkets() {
-  const data = await fetchJSON('/api/trades/markets');
+  const raw = await fetchJSON('/api/trades/markets');
+  const data = unwrapRows(raw);
+  const src = payloadSource(raw, 'gamma');
   if (!data.length) {
     el('markets-breakdown').innerHTML =
-      '<div style="color:var(--text3);font-family:var(--mono);font-size:11px">No live market data</div>';
+      '<div style="color:var(--text3);font-family:var(--mono);font-size:11px">No data</div>';
+    return;
+  }
+  if (src === 'db') {
+    const maxAbs = Math.max(...data.map(d => Math.abs(+(d.total_pnl ?? d.volume) || 0)), 1e-6);
+    el('markets-breakdown').innerHTML = data.slice(0, 8).map(m => {
+      const pnl = +(m.total_pnl || 0);
+      const w = Math.min(100, (Math.abs(pnl) / maxAbs) * 100);
+      const col = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+      return `
+    <div class="market-item">
+      <div class="market-label" title="${m.market_q||''}">${truncate(m.market_q||'—', 22)}</div>
+      <div class="market-bar-wrap">
+        <div class="market-bar" style="width:${w.toFixed(1)}%;background:${col}"></div>
+      </div>
+      <div class="market-pnl" style="color:${col}">${fmtPnl(pnl)} <span style="color:var(--text3);font-size:10px">(${m.cnt ?? 0})</span></div>
+    </div>`;
+    }).join('');
     return;
   }
   const maxVolume = Math.max(...data.map(d => Math.abs(+d.volume)));
@@ -909,15 +1080,22 @@ async function loadMarkets() {
 }
 
 async function loadHourly() {
-  const data = await fetchJSON('/api/hourly_pnl');
+  const raw = await fetchJSON('/api/hourly_pnl');
+  const data = unwrapRows(raw);
+  const isDb = payloadSource(raw, 'gamma') === 'db';
+  if (hourlyChart && hourlyChart._polyDollars !== isDb) {
+    hourlyChart.destroy();
+    hourlyChart = null;
+  }
   const labels = data.map(d => d.hour || '—');
   const values = data.map(d => +(+d.pnl).toFixed(2));
-  if (!hourlyChart) initHourlyChart(labels, values);
+  if (!hourlyChart) initHourlyChart(labels, values, isDb);
   else updateChart(hourlyChart, labels, values);
 }
 
 async function loadQuotes() {
-  const data = await fetchJSON('/api/quotes/recent');
+  const raw = await fetchJSON('/api/quotes/recent');
+  const data = unwrapRows(raw);
   const modelLabel = (m) => {
     if (m === 'live') return 'live';
     return m || 'live';
@@ -1020,9 +1198,10 @@ async function loadExecutionTelemetry() {
 // ─── Refresh all ─────────────────────────────────────────────────────────────
 async function refreshAll() {
   el('last-update').textContent = 'Refreshing…';
+  await loadSummary();
+  applyDashboardChrome();
   await Promise.all([
     loadStatus(),
-    loadSummary(),
     loadPnlCurve(),
     loadBtc(),
     loadTrades(),

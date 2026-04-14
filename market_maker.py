@@ -20,7 +20,7 @@ import statistics
 import re
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, field
-from typing import Optional
+from typing import Dict, Optional
 import aiohttp
 import psycopg
 from pathlib import Path
@@ -404,6 +404,8 @@ class BotState:
     fill_rate_window: list[float] = field(default_factory=list)
     avg_edge_window: list[float] = field(default_factory=list)
     avg_order_distance_window: list[float] = field(default_factory=list)
+    # Cumulative matched YES shares already applied via ledger (live partial fills).
+    live_matched_shares_by_order: dict[str, float] = field(default_factory=dict)
 
 state = BotState()
 
@@ -1194,6 +1196,274 @@ def persist_trade(
         ),
     )
 
+
+def ledger_apply_yes_fill(market_id: str, fill_side: str, fill_price: float, shares: float) -> float:
+    """
+    Inventory accounting on YES shares (same rules as paper fills).
+    shares = conditional token size filled.
+    """
+    qty = shares
+    pos = state.open_positions.get(market_id, {"qty": 0.0, "avg_price": 0.0})
+    cur_qty = float(pos["qty"])
+    cur_avg = float(pos["avg_price"])
+    realized = 0.0
+
+    if fill_side == "BUY":
+        if cur_qty >= 0:
+            new_qty = cur_qty + qty
+            new_avg = ((cur_avg * cur_qty) + (fill_price * qty)) / new_qty if new_qty else 0.0
+            pos["qty"], pos["avg_price"] = new_qty, new_avg
+        else:
+            close_qty = min(qty, abs(cur_qty))
+            realized += (cur_avg - fill_price) * close_qty
+            remaining_buy = qty - close_qty
+            new_qty = cur_qty + close_qty
+            if abs(new_qty) < 1e-9:
+                if remaining_buy > 0:
+                    pos["qty"], pos["avg_price"] = remaining_buy, fill_price
+                else:
+                    pos["qty"], pos["avg_price"] = 0.0, 0.0
+            else:
+                pos["qty"] = new_qty
+            if remaining_buy > 0 and new_qty > 0:
+                pos["qty"], pos["avg_price"] = remaining_buy, fill_price
+    else:  # SELL
+        if cur_qty <= 0:
+            short_qty = abs(cur_qty)
+            new_short = short_qty + qty
+            new_avg = ((cur_avg * short_qty) + (fill_price * qty)) / new_short if new_short else 0.0
+            pos["qty"], pos["avg_price"] = -new_short, new_avg
+        else:
+            close_qty = min(qty, cur_qty)
+            realized += (fill_price - cur_avg) * close_qty
+            remaining_sell = qty - close_qty
+            new_qty = cur_qty - close_qty
+            if abs(new_qty) < 1e-9:
+                if remaining_sell > 0:
+                    pos["qty"], pos["avg_price"] = -remaining_sell, fill_price
+                else:
+                    pos["qty"], pos["avg_price"] = 0.0, 0.0
+            else:
+                pos["qty"] = new_qty
+            if remaining_sell > 0 and new_qty < 0:
+                pos["qty"], pos["avg_price"] = -remaining_sell, fill_price
+
+    if abs(pos["qty"]) < 1e-9:
+        state.open_positions.pop(market_id, None)
+    else:
+        state.open_positions[market_id] = pos
+    return round(realized, 4)
+
+
+SQL_UPDATE_LIVE_TRADE_TERMINAL = """
+UPDATE trades SET status=%s, fill_price=%s, pnl=%s
+WHERE order_id=%s AND COALESCE(mode,'')='live' AND status IN ('open','submitted')
+"""
+SQL_UPDATE_LIVE_ACCUMULATE_PNL = """
+UPDATE trades SET pnl = COALESCE(pnl, 0) + %s, fill_price = %s
+WHERE order_id=%s AND COALESCE(mode,'')='live' AND status IN ('open','submitted')
+"""
+SQL_UPDATE_LIVE_TRADE_FILLED_NO_PNL_RESET = """
+UPDATE trades SET status='filled', fill_price=%s
+WHERE order_id=%s AND COALESCE(mode,'')='live' AND status IN ('open','submitted')
+"""
+
+
+def _clob_order_id(obj: dict) -> str:
+    return str(obj.get("orderID") or obj.get("id") or obj.get("order_id") or "")
+
+
+def _terminal_order_status(detail: object) -> Optional[str]:
+    """Map CLOB get_order payload to filled | cancelled | open | None (unknown)."""
+    if not isinstance(detail, dict):
+        return None
+    status = str(detail.get("status") or detail.get("orderStatus") or "").lower()
+    if status in ("filled", "matched", "fully_filled", "closed"):
+        return "filled"
+    if status in ("cancelled", "canceled", "expired", "rejected"):
+        return "cancelled"
+    if status in ("live", "open", "pending", "submitted"):
+        return "open"
+    try:
+        orig = float(detail.get("original_size") or detail.get("size") or 0)
+        matched = float(
+            detail.get("size_matched")
+            or detail.get("filled_size")
+            or detail.get("filledSize")
+            or detail.get("sizeMatched")
+            or 0
+        )
+        if orig > 0 and matched >= orig * 0.999:
+            return "filled"
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _fill_price_from_clob_detail(detail: dict, fallback: float) -> float:
+    for key in ("avg_price", "avgPrice", "price", "last_fill_price", "lastFillPrice"):
+        v = detail.get(key)
+        if v is not None:
+            try:
+                p = float(v)
+                if p > 0:
+                    return p
+            except (TypeError, ValueError):
+                continue
+    return max(0.01, float(fallback))
+
+
+def _fill_size_from_clob_detail(detail: dict, fallback: float) -> float:
+    for key in ("size_matched", "sizeMatched", "filled_size", "filledSize", "matched"):
+        v = detail.get(key)
+        if v is not None:
+            try:
+                s = float(v)
+                if s > 0:
+                    return s
+            except (TypeError, ValueError):
+                continue
+    return max(0.0, float(fallback))
+
+
+def _original_size_clob(detail: dict, fallback_shares: float) -> float:
+    for key in ("original_size", "originalSize", "size", "base_size", "baseSize"):
+        v = detail.get(key)
+        if v is not None:
+            try:
+                s = float(v)
+                if s > 0:
+                    return s
+            except (TypeError, ValueError):
+                continue
+    return max(0.0, float(fallback_shares))
+
+
+def _matched_size_clob(detail: dict, fallback: float) -> float:
+    m = _fill_size_from_clob_detail(detail, 0.0)
+    if m > 0:
+        return m
+    return max(0.0, float(fallback))
+
+
+def sync_live_trades_with_exchange() -> Dict[str, int]:
+    """
+    Reconcile DB rows (live, open/submitted) with CLOB get_orders / get_order.
+    Applies incremental fills (partial + full) using live_matched_shares_by_order watermarks,
+    then terminal status (filled / cancelled).
+    """
+    stats: Dict[str, int] = {"filled": 0, "cancelled": 0, "skipped": 0, "fill_ticks": 0}
+    if not is_live_mode():
+        return stats
+    try:
+        client = get_live_client()
+        open_list = client.get_orders() or []
+    except Exception as e:
+        log.warning(f"[LIVE] sync: get_orders failed: {e}")
+        return stats
+
+    open_ids = {_clob_order_id(o) for o in open_list if isinstance(o, dict)}
+    open_ids.discard("")
+
+    try:
+        cur = db.execute(
+            "SELECT order_id, market_id, side, price, size_shares, notional_usdc "
+            "FROM trades WHERE COALESCE(mode,'')='live' AND status IN ('open','submitted') "
+            "ORDER BY ts DESC LIMIT 400"
+        )
+        rows = cur.fetchall() or []
+    except Exception as e:
+        log.warning(f"[LIVE] sync: DB read failed: {e}")
+        return stats
+
+    for row in rows:
+        oid = str(row[0] or "")
+        if not oid:
+            continue
+        market_id = str(row[1] or "")
+        side = str(row[2] or "BUY").upper()
+        row_price = float(row[3] or 0)
+        row_shares = float(row[4] or 0)
+        notional = float(row[5] or 0)
+
+        detail = None
+        try:
+            detail = client.get_order(oid)
+        except Exception as e:
+            log.debug(f"[LIVE] sync: get_order {oid[:16]}… {e}")
+
+        on_book = oid in open_ids
+
+        if detail is None:
+            if on_book:
+                stats["skipped"] += 1
+                continue
+            state.live_matched_shares_by_order.pop(oid, None)
+            db_write(
+                SQL_UPDATE_LIVE_TRADE_TERMINAL,
+                ("cancelled", None, 0.0, oid),
+            )
+            stats["cancelled"] += 1
+            continue
+
+        if not isinstance(detail, dict):
+            stats["skipped"] += 1
+            continue
+
+        term = _terminal_order_status(detail)
+
+        if term == "cancelled":
+            state.live_matched_shares_by_order.pop(oid, None)
+            db_write(
+                SQL_UPDATE_LIVE_TRADE_TERMINAL,
+                ("cancelled", None, 0.0, oid),
+            )
+            stats["cancelled"] += 1
+            continue
+
+        orig = _original_size_clob(detail, row_shares)
+        matched = _matched_size_clob(detail, 0.0)
+        if matched <= 0 and row_price > 0 and notional > 0:
+            matched = notional_to_shares(notional, max(0.01, row_price))
+        if orig <= 0 and matched > 0:
+            orig = matched
+        if term == "filled" and matched <= 0 and orig > 0:
+            matched = orig
+
+        wm = float(state.live_matched_shares_by_order.get(oid, 0.0))
+        delta = max(0.0, matched - wm)
+        fill_px = _fill_price_from_clob_detail(detail, row_price)
+
+        if delta > 1e-8:
+            trade_pnl = ledger_apply_yes_fill(market_id, side, fill_px, delta)
+            state.realized_pnl += trade_pnl
+            refresh_account_state()
+            db_write(SQL_UPDATE_LIVE_ACCUMULATE_PNL, (trade_pnl, fill_px, oid))
+            state.live_matched_shares_by_order[oid] = matched
+            stats["fill_ticks"] += 1
+
+        fully_filled = (orig > 0 and matched >= orig * 0.999) or (term == "filled")
+
+        if fully_filled:
+            state.live_matched_shares_by_order.pop(oid, None)
+            db_write(SQL_UPDATE_LIVE_TRADE_FILLED_NO_PNL_RESET, (fill_px, oid))
+            stats["filled"] += 1
+            continue
+
+        if term == "open" or on_book:
+            stats["skipped"] += 1
+            continue
+
+        # Off book, not cancelled/open/filled-complete: unknown terminal
+        log.debug(
+            f"[LIVE] sync: order {oid[:16]}… off open list, unknown status "
+            f"{detail.get('status')!r} — skipping DB status update"
+        )
+        stats["skipped"] += 1
+
+    return stats
+
+
 async def place_order(
     session: aiohttp.ClientSession,
     token_id: str,
@@ -1228,64 +1498,6 @@ async def place_order(
     def clamp(v: float, lo: float, hi: float) -> float:
         return max(lo, min(hi, v))
 
-    def apply_fill_pnl(market_id: str, fill_side: str, fill_price: float, shares: float) -> float:
-        """
-        Inventory accounting on YES shares:
-        shares = usdc_notional / price
-        realized PnL appears when reducing an existing long/short.
-        """
-        qty = shares
-        pos = state.open_positions.get(market_id, {"qty": 0.0, "avg_price": 0.0})
-        cur_qty = float(pos["qty"])
-        cur_avg = float(pos["avg_price"])
-        realized = 0.0
-
-        if fill_side == "BUY":
-            if cur_qty >= 0:
-                new_qty = cur_qty + qty
-                new_avg = ((cur_avg * cur_qty) + (fill_price * qty)) / new_qty if new_qty else 0.0
-                pos["qty"], pos["avg_price"] = new_qty, new_avg
-            else:
-                close_qty = min(qty, abs(cur_qty))
-                realized += (cur_avg - fill_price) * close_qty
-                remaining_buy = qty - close_qty
-                new_qty = cur_qty + close_qty
-                if abs(new_qty) < 1e-9:
-                    if remaining_buy > 0:
-                        pos["qty"], pos["avg_price"] = remaining_buy, fill_price
-                    else:
-                        pos["qty"], pos["avg_price"] = 0.0, 0.0
-                else:
-                    pos["qty"] = new_qty
-                if remaining_buy > 0 and new_qty > 0:
-                    pos["qty"], pos["avg_price"] = remaining_buy, fill_price
-        else:  # SELL
-            if cur_qty <= 0:
-                short_qty = abs(cur_qty)
-                new_short = short_qty + qty
-                new_avg = ((cur_avg * short_qty) + (fill_price * qty)) / new_short if new_short else 0.0
-                pos["qty"], pos["avg_price"] = -new_short, new_avg
-            else:
-                close_qty = min(qty, cur_qty)
-                realized += (fill_price - cur_avg) * close_qty
-                remaining_sell = qty - close_qty
-                new_qty = cur_qty - close_qty
-                if abs(new_qty) < 1e-9:
-                    if remaining_sell > 0:
-                        pos["qty"], pos["avg_price"] = -remaining_sell, fill_price
-                    else:
-                        pos["qty"], pos["avg_price"] = 0.0, 0.0
-                else:
-                    pos["qty"] = new_qty
-                if remaining_sell > 0 and new_qty < 0:
-                    pos["qty"], pos["avg_price"] = -remaining_sell, fill_price
-
-        if abs(pos["qty"]) < 1e-9:
-            state.open_positions.pop(market_id, None)
-        else:
-            state.open_positions[market_id] = pos
-        return round(realized, 4)
-
     if paper_mode:
         ref_mid = mid if mid is not None else market.yes_price
         # Paper fills should be strongly tied to proximity to current midpoint.
@@ -1306,7 +1518,7 @@ async def place_order(
         fill_price = price if is_filled else None
         trade_pnl = 0.0
         if is_filled:
-            trade_pnl = apply_fill_pnl(market.condition_id, side, price, size_shares)
+            trade_pnl = ledger_apply_yes_fill(market.condition_id, side, price, size_shares)
             state.realized_pnl += trade_pnl
             refresh_account_state()
 
@@ -1373,6 +1585,30 @@ async def place_order(
         return None
 
 # ─── Risk / Kill Switch ────────────────────────────────────────────────────────
+
+def count_live_open_orders() -> int:
+    """
+    Resting live orders for MAX_OPEN_ORDERS enforcement.
+    Prefer CLOB get_orders(); fall back to DB if the client call fails.
+    """
+    if not is_live_mode():
+        return 0
+    try:
+        client = get_live_client()
+        orders = client.get_orders()
+        if isinstance(orders, list):
+            return len(orders)
+    except Exception as e:
+        log.debug(f"get_orders count unavailable: {e}")
+    try:
+        row = db.execute(
+            "SELECT COUNT(*) AS c FROM trades WHERE COALESCE(mode, '') = 'live' "
+            "AND status IN ('open', 'submitted')"
+        ).fetchone()
+        return int(row[0] if row and row[0] is not None else 0)
+    except Exception:
+        return 0
+
 
 def cancel_live_orders_best_effort() -> int:
     """
@@ -1506,10 +1742,37 @@ async def main_loop():
                         order_distance_count=0,
                     )
                 else:
+                    if is_live_mode():
+                        sync_pre = sync_live_trades_with_exchange()
                     if is_live_mode() and config.CANCEL_BEFORE_REQUOTE:
                         cancelled = cancel_live_orders_best_effort()
                         if cancelled:
                             log.info(f"Cancelled {cancelled} stale live orders before re-quote")
+                    if is_live_mode():
+                        sync_st = sync_live_trades_with_exchange()
+                        merged = {
+                            "filled": sync_pre.get("filled", 0) + sync_st.get("filled", 0),
+                            "fill_ticks": sync_pre.get("fill_ticks", 0) + sync_st.get("fill_ticks", 0),
+                            "cancelled": sync_pre.get("cancelled", 0) + sync_st.get("cancelled", 0),
+                            "skipped": sync_st.get("skipped", 0),
+                        }
+                        if merged.get("filled") or merged.get("cancelled") or merged.get("fill_ticks"):
+                            log.info(
+                                f"[LIVE] exchange sync: orders_filled={merged['filled']} "
+                                f"fill_ticks={merged.get('fill_ticks', 0)} "
+                                f"cancelled={merged['cancelled']} "
+                                f"resting_skipped={merged.get('skipped', 0)}"
+                            )
+                        fills += merged.get("fill_ticks", 0)
+                    open_order_cap_blocked = False
+                    if is_live_mode():
+                        n_open = count_live_open_orders()
+                        if n_open >= config.MAX_OPEN_ORDERS:
+                            log.warning(
+                                f"Open orders {n_open} >= POLY_MAX_OPEN_ORDERS ({config.MAX_OPEN_ORDERS}) "
+                                "— skipping new placements this cycle"
+                            )
+                            open_order_cap_blocked = True
                     # 4. Quote each market
                     for market in markets:
                         quote = await compute_quote(session, market)
@@ -1526,6 +1789,8 @@ async def main_loop():
                         )
 
                         if quote.should_place:
+                            if open_order_cap_blocked:
+                                continue
                             quotes_eligible += 1
                             edge_sum += float(quote.edge)
                             edge_count += 1
