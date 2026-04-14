@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, field
 from typing import Optional
 import aiohttp
-import sqlite3
+import psycopg
 from pathlib import Path
 
 # ─── Configuration ────────────────────────────────────────────────────────────
@@ -68,8 +68,13 @@ class Config:
     API_SECRET: str  = field(default_factory=lambda: os.getenv("POLY_API_SECRET", ""))
     API_PASSPHRASE: str = field(default_factory=lambda: os.getenv("POLY_PASSPHRASE", ""))
 
-    # DB path
-    DB_PATH: str = str(Path(__file__).parent / "data" / "bot.db")
+    # Database
+    DATABASE_URL: str = field(
+        default_factory=lambda: os.getenv(
+            "DATABASE_URL",
+            "postgresql://postgres:postgres@localhost:5432/polybot",
+        )
+    )
 
 config = Config()
 
@@ -90,13 +95,12 @@ log = logging.getLogger("polybot")
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 
-def init_db(path: str):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    con = sqlite3.connect(path)
+def init_db(database_url: str):
+    con = psycopg.connect(database_url, autocommit=False)
     con.execute("""
         CREATE TABLE IF NOT EXISTS trades (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts          TEXT    NOT NULL,
+            id          BIGSERIAL PRIMARY KEY,
+            ts          TIMESTAMPTZ NOT NULL,
             market_id   TEXT    NOT NULL,
             market_slug TEXT,
             event_slug  TEXT,
@@ -110,15 +114,12 @@ def init_db(path: str):
             fill_price  REAL
         )
     """)
-    trade_cols = {r[1] for r in con.execute("PRAGMA table_info(trades)").fetchall()}
-    if "market_slug" not in trade_cols:
-        con.execute("ALTER TABLE trades ADD COLUMN market_slug TEXT")
-    if "event_slug" not in trade_cols:
-        con.execute("ALTER TABLE trades ADD COLUMN event_slug TEXT")
+    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS market_slug TEXT")
+    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS event_slug TEXT")
     con.execute("""
         CREATE TABLE IF NOT EXISTS quotes (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts          TEXT    NOT NULL,
+            id          BIGSERIAL PRIMARY KEY,
+            ts          TIMESTAMPTZ NOT NULL,
             market_id   TEXT    NOT NULL,
             bid         REAL,
             ask         REAL,
@@ -130,13 +131,13 @@ def init_db(path: str):
     """)
     con.execute("""
         CREATE TABLE IF NOT EXISTS btc_prices (
-            ts    TEXT PRIMARY KEY,
+            ts    TIMESTAMPTZ PRIMARY KEY,
             price REAL NOT NULL
         )
     """)
     con.execute("""
         CREATE TABLE IF NOT EXISTS bot_stats (
-            ts              TEXT PRIMARY KEY,
+            ts              TIMESTAMPTZ PRIMARY KEY,
             total_trades    INTEGER DEFAULT 0,
             open_positions  INTEGER DEFAULT 0,
             realized_pnl    REAL    DEFAULT 0,
@@ -149,7 +150,7 @@ def init_db(path: str):
     con.execute("""
         CREATE TABLE IF NOT EXISTS runtime_state (
             id              INTEGER PRIMARY KEY CHECK (id = 1),
-            updated_at      TEXT NOT NULL,
+            updated_at      TIMESTAMPTZ NOT NULL,
             running         INTEGER DEFAULT 1,
             kill_switch     INTEGER DEFAULT 0,
             paper_mode      INTEGER DEFAULT 1,
@@ -161,7 +162,7 @@ def init_db(path: str):
     con.commit()
     return con
 
-db = init_db(config.DB_PATH)
+db = init_db(config.DATABASE_URL)
 
 # ─── Data Models ──────────────────────────────────────────────────────────────
 
@@ -239,8 +240,12 @@ async def get_btc_price(session: aiohttp.ClientSession) -> float:
             price = float(d["price"])
             state.btc_price = price
             db.execute(
-                "INSERT OR REPLACE INTO btc_prices VALUES (?,?)",
-                (datetime.now(timezone.utc).isoformat(), price)
+                """
+                INSERT INTO btc_prices (ts, price)
+                VALUES (%s, %s)
+                ON CONFLICT (ts) DO UPDATE SET price = EXCLUDED.price
+                """,
+                (datetime.now(timezone.utc), price),
             )
             db.commit()
             return price
@@ -482,8 +487,8 @@ async def compute_quote(session: aiohttp.ClientSession, market: Market) -> Optio
     # Log to DB
     db.execute(
         """INSERT INTO quotes (ts,market_id,bid,ask,fair_price,mid,edge,placed)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (datetime.now(timezone.utc).isoformat(),
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (datetime.now(timezone.utc),
          market.condition_id, bid, ask, fair, mid, edge, int(should_place))
     )
     db.commit()
@@ -596,8 +601,8 @@ async def place_order(
         state.total_trades += 1
         db.execute(
             """INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,side,price,size,order_id,status,pnl,fill_price)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (datetime.now(timezone.utc).isoformat(),
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (datetime.now(timezone.utc),
              market.condition_id, market.slug, market.event_slug, market.question,
              side, price, size, order_id, status, trade_pnl, fill_price)
         )
@@ -635,8 +640,8 @@ async def place_order(
         state.total_trades += 1
         db.execute(
             """INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,side,price,size,order_id,status)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (datetime.now(timezone.utc).isoformat(),
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (datetime.now(timezone.utc),
              market.condition_id, market.slug, market.event_slug, market.question,
              side, price, size, real_id, "open")
         )
@@ -666,11 +671,19 @@ def update_stats():
     state.daily_pnl = compute_daily_pnl()
     refresh_account_state()
     db.execute(
-        """INSERT OR REPLACE INTO bot_stats
+        """INSERT INTO bot_stats
            (ts,total_trades,open_positions,realized_pnl,unrealized_pnl,daily_pnl,balance,active_markets)
-           VALUES (?,?,?,?,?,?,?,?)""",
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT (ts) DO UPDATE
+           SET total_trades = EXCLUDED.total_trades,
+               open_positions = EXCLUDED.open_positions,
+               realized_pnl = EXCLUDED.realized_pnl,
+               unrealized_pnl = EXCLUDED.unrealized_pnl,
+               daily_pnl = EXCLUDED.daily_pnl,
+               balance = EXCLUDED.balance,
+               active_markets = EXCLUDED.active_markets""",
         (
-            datetime.now(timezone.utc).isoformat(),
+            datetime.now(timezone.utc),
             state.total_trades,
             len(state.open_positions),
             state.realized_pnl,
@@ -791,17 +804,25 @@ async def main_loop():
 
 def compute_daily_pnl() -> float:
     row = db.execute(
-        "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='filled' AND ts > datetime('now','-1 day')"
+        "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='filled' AND ts > (NOW() - INTERVAL '1 day')"
     ).fetchone()
     return float(row[0] or 0.0)
 
 def update_runtime_state():
     db.execute(
-        """INSERT OR REPLACE INTO runtime_state
+        """INSERT INTO runtime_state
            (id,updated_at,running,kill_switch,paper_mode,btc_price,last_cycle,errors)
-           VALUES (1,?,?,?,?,?,?,?)""",
+           VALUES (1,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT (id) DO UPDATE
+           SET updated_at = EXCLUDED.updated_at,
+               running = EXCLUDED.running,
+               kill_switch = EXCLUDED.kill_switch,
+               paper_mode = EXCLUDED.paper_mode,
+               btc_price = EXCLUDED.btc_price,
+               last_cycle = EXCLUDED.last_cycle,
+               errors = EXCLUDED.errors""",
         (
-            datetime.now(timezone.utc).isoformat(),
+            datetime.now(timezone.utc),
             int(state.running),
             int(state.kill_switch),
             int(state.paper_mode),

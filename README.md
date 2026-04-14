@@ -19,7 +19,13 @@ Replicates the strategy of the `0x6E1d...D0F` account:
 pip install -r requirements.txt
 ```
 
-### 2. Run in paper trading mode (no keys needed)
+### 2. Configure PostgreSQL
+```bash
+# Example local DB (adjust credentials/host as needed)
+export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/polybot
+```
+
+### 3. Run in paper trading mode (no keys needed)
 ```bash
 # Terminal 1 — start the bot
 python market_maker.py
@@ -33,9 +39,10 @@ Paper mode defaults:
 - `POLY_FORCE_PAPER=1` (enabled by default)
 - `POLY_PAPER_INITIAL_BALANCE=500` (starting paper equity)
 
-### 3. Configure for live trading
+### 4. Configure for live trading
 Create a `.env` file:
 ```
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/polybot
 POLY_PRIVATE_KEY=0x_your_polygon_wallet_private_key
 POLY_API_KEY=your_clob_api_key
 POLY_API_SECRET=your_clob_api_secret
@@ -82,8 +89,6 @@ poly-btc/
 ├── market_maker.py         ← Main trading bot
 ├── server.py               ← Flask API server
 ├── index.html              ← Dashboard UI
-├── data/
-│   └── bot.db              ← SQLite (auto-created)
 ├── logs/
 │   └── bot_YYYYMMDD.log    ← Daily log files
 └── requirements.txt
@@ -105,6 +110,7 @@ Edit `market_maker.py` → `Config` class:
 | `MAX_DAILY_LOSS` | $200 | Kill switch threshold |
 
 Runtime env vars:
+- `DATABASE_URL=postgresql://...` sets PostgreSQL connection
 - `POLY_FORCE_PAPER=1` keeps bot in paper mode even if keys exist
 - `POLY_PAPER_INITIAL_BALANCE=500` sets paper account starting balance
 

@@ -1,22 +1,23 @@
 """
 Polymarket Bot Dashboard — Backend API
-Serves real-time stats from the SQLite database.
+Serves real-time stats from the PostgreSQL database.
 Run: python server.py
 Access: http://localhost:5050
 """
 
-import sqlite3
 import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import urlopen
-from flask import Flask, jsonify, send_from_directory
+import psycopg
+from psycopg.rows import dict_row
+from flask import Flask, jsonify, send_from_directory, g
 from dotenv import load_dotenv
 
 load_dotenv()
 
-DB_PATH = str(Path(__file__).parent / "data" / "bot.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/polybot")
 DEFAULT_STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR = str(DEFAULT_STATIC_DIR if DEFAULT_STATIC_DIR.exists() else Path(__file__).parent)
 
@@ -24,38 +25,40 @@ app = Flask(__name__, static_folder=STATIC_DIR)
 EVENT_SLUG_CACHE: dict[str, str] = {}
 
 def get_db():
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    return con
+    if "db" not in g:
+        g.db = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    return g.db
+
+@app.teardown_appcontext
+def close_db(_exc):
+    con = g.pop("db", None)
+    if con is not None:
+        con.close()
 
 def ensure_db():
     """Create DB schema. Demo data is optional via POLYBOT_SEED_DEMO=1."""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    con = sqlite3.connect(DB_PATH)
+    con = psycopg.connect(DATABASE_URL, row_factory=dict_row)
     con.execute("""CREATE TABLE IF NOT EXISTS trades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, market_id TEXT,
+        id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ, market_id TEXT,
         market_slug TEXT, event_slug TEXT, market_q TEXT, side TEXT, price REAL, size REAL,
         order_id TEXT, status TEXT DEFAULT 'open', pnl REAL DEFAULT 0, fill_price REAL
     )""")
-    trade_cols = {r[1] for r in con.execute("PRAGMA table_info(trades)").fetchall()}
-    if "market_slug" not in trade_cols:
-        con.execute("ALTER TABLE trades ADD COLUMN market_slug TEXT")
-    if "event_slug" not in trade_cols:
-        con.execute("ALTER TABLE trades ADD COLUMN event_slug TEXT")
+    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS market_slug TEXT")
+    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS event_slug TEXT")
     con.execute("""CREATE TABLE IF NOT EXISTS quotes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, market_id TEXT,
+        id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ, market_id TEXT,
         bid REAL, ask REAL, fair_price REAL, mid REAL, edge REAL, placed INTEGER DEFAULT 0
     )""")
-    con.execute("""CREATE TABLE IF NOT EXISTS btc_prices (ts TEXT PRIMARY KEY, price REAL)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS btc_prices (ts TIMESTAMPTZ PRIMARY KEY, price REAL)""")
     con.execute("""CREATE TABLE IF NOT EXISTS bot_stats (
-        ts TEXT PRIMARY KEY, total_trades INTEGER DEFAULT 0,
+        ts TIMESTAMPTZ PRIMARY KEY, total_trades INTEGER DEFAULT 0,
         open_positions INTEGER DEFAULT 0, realized_pnl REAL DEFAULT 0,
         unrealized_pnl REAL DEFAULT 0, daily_pnl REAL DEFAULT 0,
         balance REAL DEFAULT 0, active_markets INTEGER DEFAULT 0
     )""")
     con.execute("""CREATE TABLE IF NOT EXISTS runtime_state (
         id INTEGER PRIMARY KEY CHECK (id = 1),
-        updated_at TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
         running INTEGER DEFAULT 1,
         kill_switch INTEGER DEFAULT 0,
         paper_mode INTEGER DEFAULT 1,
@@ -65,11 +68,11 @@ def ensure_db():
     )""")
 
     # Seed demo data only when explicitly requested.
-    count = con.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+    count = con.execute("SELECT COUNT(*) AS cnt FROM trades").fetchone()["cnt"]
     if count == 0 and os.getenv("POLYBOT_SEED_DEMO", "0") == "1":
         _seed_demo_data(con)
     con.commit()
-    return con
+    con.close()
 
 def _seed_demo_data(con):
     """Insert realistic demo data so the dashboard renders on first launch."""
@@ -96,8 +99,8 @@ def _seed_demo_data(con):
         pnl = round(random.gauss(0.8, 1.2), 2)  # Positive edge mean
         total_pnl += pnl
         con.execute(
-            "INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,side,price,size,order_id,status,pnl,fill_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (ts, mid, "", "", mq, side, price, size, f"ord_{i:04d}", "filled", pnl, round(price + 0.005 * (1 if side=="BUY" else -1), 3))
+            "INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,side,price,size,order_id,status,pnl,fill_price) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (ts, mid, "", "", mq, side, price, size, f"ord_{i:04d}", "filled", pnl, round(price + 0.005 * (1 if side=="BUY" else -1), 3)),
         )
 
     # BTC prices last 24hrs
@@ -105,7 +108,10 @@ def _seed_demo_data(con):
         ts = (now - timedelta(minutes=j*5)).isoformat()
         base = 87500
         price = base + math.sin(j/20)*800 + random.gauss(0, 200)
-        con.execute("INSERT OR IGNORE INTO btc_prices VALUES (?,?)", (ts, round(price, 2)))
+        con.execute(
+            "INSERT INTO btc_prices VALUES (%s,%s) ON CONFLICT (ts) DO NOTHING",
+            (ts, round(price, 2)),
+        )
 
     # Quotes log
     for k in range(200):
@@ -115,8 +121,8 @@ def _seed_demo_data(con):
         mid = round(fair + random.gauss(0, 0.04), 3)
         edge = round(abs(fair - mid), 3)
         con.execute(
-            "INSERT INTO quotes (ts,market_id,bid,ask,fair_price,mid,edge,placed) VALUES (?,?,?,?,?,?,?,?)",
-            (ts, mid_v, round(fair-0.02,3), round(fair+0.02,3), fair, mid, edge, int(edge>0.015))
+            "INSERT INTO quotes (ts,market_id,bid,ask,fair_price,mid,edge,placed) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (ts, mid_v, round(fair-0.02,3), round(fair+0.02,3), fair, mid, edge, int(edge>0.015)),
         )
 
     # Bot stats snapshots
@@ -125,9 +131,14 @@ def _seed_demo_data(con):
         ts = (now - timedelta(hours=h)).isoformat()
         pnl_acc += random.gauss(380, 80)  # ~$272k over month
         con.execute(
-            "INSERT OR IGNORE INTO bot_stats (ts,total_trades,open_positions,realized_pnl,daily_pnl,active_markets) VALUES (?,?,?,?,?,?)",
-            (ts, max(0,645-h), random.randint(3,8), round(pnl_acc,2), round(random.gauss(9100,1200),2), random.randint(5,10))
+            "INSERT INTO bot_stats (ts,total_trades,open_positions,realized_pnl,daily_pnl,active_markets) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (ts) DO NOTHING",
+            (ts, max(0,645-h), random.randint(3,8), round(pnl_acc,2), round(random.gauss(9100,1200),2), random.randint(5,10)),
         )
+
+def fmt_ts(value):
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%dT%H:%M")
+    return str(value)[:16]
 
 def resolve_event_slug(market_slug: str) -> str:
     """
@@ -162,10 +173,10 @@ def resolve_event_slug(market_slug: str) -> str:
 def summary():
     con = get_db()
     paper_initial_balance = float(os.getenv("POLY_PAPER_INITIAL_BALANCE", "500"))
-    total_trades = con.execute("SELECT COUNT(*) FROM trades").fetchone()[0] or 0
-    realized_pnl = con.execute("SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='filled'").fetchone()[0] or 0
-    total_volume = con.execute("SELECT COALESCE(SUM(size), 0) FROM trades").fetchone()[0] or 0
-    open_t = con.execute("SELECT COUNT(*) FROM trades WHERE status='open'").fetchone()[0] or 0
+    total_trades = con.execute("SELECT COUNT(*) AS cnt FROM trades").fetchone()["cnt"] or 0
+    realized_pnl = con.execute("SELECT COALESCE(SUM(pnl), 0) AS pnl FROM trades WHERE status='filled'").fetchone()["pnl"] or 0
+    total_volume = con.execute("SELECT COALESCE(SUM(size), 0) AS volume FROM trades").fetchone()["volume"] or 0
+    open_t = con.execute("SELECT COUNT(*) AS cnt FROM trades WHERE status='open'").fetchone()["cnt"] or 0
     last_balance_row = con.execute(
         "SELECT balance FROM bot_stats ORDER BY ts DESC LIMIT 1"
     ).fetchone()
@@ -177,19 +188,19 @@ def summary():
         "SELECT updated_at, running, kill_switch, paper_mode, btc_price FROM runtime_state WHERE id=1"
     ).fetchone()
 
-    one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
     markets_active = con.execute(
-        "SELECT COUNT(DISTINCT market_id) FROM quotes WHERE ts >= ?",
-        (one_hour_ago,)
-    ).fetchone()[0] or 0
+        "SELECT COUNT(DISTINCT market_id) AS active_markets FROM quotes WHERE ts >= %s",
+        (one_hour_ago,),
+    ).fetchone()["active_markets"] or 0
 
-    one_day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    one_day_ago = datetime.now(timezone.utc) - timedelta(days=1)
     daily_pnl = con.execute(
-        "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE ts >= ? AND status='filled'",
-        (one_day_ago,)
-    ).fetchone()[0] or 0
-    win_trades = con.execute("SELECT COUNT(*) FROM trades WHERE pnl > 0 AND status='filled'").fetchone()[0] or 0
-    total_filled = con.execute("SELECT COUNT(*) FROM trades WHERE status='filled'").fetchone()[0] or 0
+        "SELECT COALESCE(SUM(pnl), 0) AS pnl FROM trades WHERE ts >= %s AND status='filled'",
+        (one_day_ago,),
+    ).fetchone()["pnl"] or 0
+    win_trades = con.execute("SELECT COUNT(*) AS cnt FROM trades WHERE pnl > 0 AND status='filled'").fetchone()["cnt"] or 0
+    total_filled = con.execute("SELECT COUNT(*) AS cnt FROM trades WHERE status='filled'").fetchone()["cnt"] or 0
     win_rate = round((win_trades / total_filled * 100), 1) if total_filled > 0 else 0.0
 
     return jsonify({
@@ -197,7 +208,7 @@ def summary():
         "realized_pnl":    round(realized_pnl, 2),
         "total_volume":    round(total_volume, 2),
         "open_orders":     open_t,
-        "btc_price":       float(runtime["btc_price"]) if runtime and runtime["btc_price"] else (btc[0] if btc else 0),
+        "btc_price":       float(runtime["btc_price"]) if runtime and runtime["btc_price"] else (btc["price"] if btc else 0),
         "active_markets":  markets_active,
         "daily_pnl":       round(daily_pnl, 2),
         "win_rate":        win_rate,
@@ -230,7 +241,7 @@ def status():
     healthy = False
     if updated_at:
         try:
-            ts = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            ts = updated_at if isinstance(updated_at, datetime) else datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
             healthy = (datetime.now(timezone.utc) - ts).total_seconds() <= 120
         except Exception:
             healthy = False
@@ -243,7 +254,7 @@ def status():
         "btc_price": float(row["btc_price"] or 0),
         "last_cycle": row["last_cycle"] or "",
         "errors": int(row["errors"] or 0),
-        "updated_at": updated_at,
+        "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else updated_at,
     })
 
 @app.route("/api/pnl_curve")
@@ -263,11 +274,11 @@ def pnl_curve():
         points = []
         for t in trades:
             acc += float(t["pnl"] or 0)
-            points.append({"ts": t["ts"][:16], "pnl": round(acc, 4)})
+            points.append({"ts": fmt_ts(t["ts"]), "pnl": round(acc, 4)})
         return jsonify(points)
 
     rows = list(reversed(rows))
-    return jsonify([{"ts": r["ts"][:16], "pnl": r["realized_pnl"]} for r in rows])
+    return jsonify([{"ts": fmt_ts(r["ts"]), "pnl": r["realized_pnl"]} for r in rows])
 
 @app.route("/api/trades/recent")
 def recent_trades():
@@ -279,6 +290,7 @@ def recent_trades():
     out = []
     for r in rows:
         d = dict(r)
+        d["ts"] = fmt_ts(d.get("ts"))
         event_slug = (d.get("event_slug") or "").strip()
         market_slug = (d.get("market_slug") or "").strip()
         if not event_slug and market_slug:
@@ -287,7 +299,7 @@ def recent_trades():
             if event_slug:
                 try:
                     con.execute(
-                        "UPDATE trades SET event_slug=? WHERE market_slug=? AND (event_slug IS NULL OR event_slug='')",
+                        "UPDATE trades SET event_slug=%s WHERE market_slug=%s AND (event_slug IS NULL OR event_slug='')",
                         (event_slug, market_slug),
                     )
                     con.commit()
@@ -323,7 +335,7 @@ def btc_history():
         "SELECT ts, price FROM btc_prices ORDER BY ts DESC LIMIT 288"
     ).fetchall()
     rows = list(reversed(rows))
-    return jsonify([{"ts": r["ts"][:16], "price": r["price"]} for r in rows])
+    return jsonify([{"ts": fmt_ts(r["ts"]), "price": r["price"]} for r in rows])
 
 @app.route("/api/quotes/recent")
 def recent_quotes():
@@ -332,13 +344,18 @@ def recent_quotes():
         """SELECT ts, market_id, bid, ask, fair_price, mid, edge, placed
            FROM quotes ORDER BY ts DESC LIMIT 30"""
     ).fetchall()
-    return jsonify([dict(r) for r in rows])
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["ts"] = fmt_ts(d.get("ts"))
+        out.append(d)
+    return jsonify(out)
 
 @app.route("/api/hourly_pnl")
 def hourly_pnl():
     con = get_db()
     rows = con.execute(
-        """SELECT strftime('%Y-%m-%d %H:00', ts) as hour,
+        """SELECT to_char(date_trunc('hour', ts), 'YYYY-MM-DD HH24:00') as hour,
                   COUNT(*) as trades, COALESCE(SUM(pnl), 0) as pnl
            FROM trades WHERE status='filled'
            GROUP BY hour ORDER BY hour DESC LIMIT 48"""
