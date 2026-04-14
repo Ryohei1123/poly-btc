@@ -45,6 +45,9 @@ def ensure_db():
     )""")
     con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS market_slug TEXT")
     con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS event_slug TEXT")
+    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS mode TEXT DEFAULT 'paper'")
+    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS notional_usdc REAL")
+    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS size_shares REAL")
     con.execute("""CREATE TABLE IF NOT EXISTS quotes (
         id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ, market_id TEXT,
         bid REAL, ask REAL, fair_price REAL, mid REAL, edge REAL, placed INTEGER DEFAULT 0
@@ -175,8 +178,8 @@ def summary():
     paper_initial_balance = float(os.getenv("POLY_PAPER_INITIAL_BALANCE", "500"))
     total_trades = con.execute("SELECT COUNT(*) AS cnt FROM trades").fetchone()["cnt"] or 0
     realized_pnl = con.execute("SELECT COALESCE(SUM(pnl), 0) AS pnl FROM trades WHERE status='filled'").fetchone()["pnl"] or 0
-    total_volume = con.execute("SELECT COALESCE(SUM(size), 0) AS volume FROM trades").fetchone()["volume"] or 0
-    open_t = con.execute("SELECT COUNT(*) AS cnt FROM trades WHERE status='open'").fetchone()["cnt"] or 0
+    total_volume = con.execute("SELECT COALESCE(SUM(COALESCE(notional_usdc, size)), 0) AS volume FROM trades").fetchone()["volume"] or 0
+    open_t = con.execute("SELECT COUNT(*) AS cnt FROM trades WHERE status IN ('open','submitted')").fetchone()["cnt"] or 0
     last_balance_row = con.execute(
         "SELECT balance FROM bot_stats ORDER BY ts DESC LIMIT 1"
     ).fetchone()
@@ -284,7 +287,7 @@ def pnl_curve():
 def recent_trades():
     con = get_db()
     rows = con.execute(
-        """SELECT ts, market_id, market_slug, event_slug, market_q, side, price, size, pnl, status
+        """SELECT ts, market_id, market_slug, event_slug, market_q, mode, side, price, size, notional_usdc, size_shares, pnl, status
            FROM trades ORDER BY ts DESC LIMIT 75"""
     ).fetchall()
     out = []
@@ -305,14 +308,23 @@ def recent_trades():
                     con.commit()
                 except Exception:
                     pass
-        d["market_url"] = f"https://polymarket.com/event/{event_slug}" if event_slug else None
+        if market_slug:
+            d["market_url"] = f"https://polymarket.com/market/{market_slug}"
+        elif event_slug:
+            d["market_url"] = f"https://polymarket.com/event/{event_slug}"
+        else:
+            d["market_url"] = None
         price = float(d.get("price") or 0.0)
-        size = float(d.get("size") or 0.0)
+        size = float(d.get("notional_usdc") or d.get("size") or 0.0)
+        shares = float(d.get("size_shares") or 0.0)
+        if shares <= 0:
+            shares = round(size / max(price, 0.01), 2) if size > 0 else 0.0
         pnl = float(d.get("pnl") or 0.0)
         # Market maker currently quotes YES token, so this indicates YES share flow.
         d["outcome"] = "YES"
         d["price_cents"] = round(price * 100.0, 2)
-        d["contracts"] = round(size / max(price, 0.01), 2)
+        d["contracts"] = round(shares, 2)
+        d["notional_usdc"] = round(size, 4)
         d["return_pct"] = round((pnl / size * 100.0), 2) if size > 0 else 0.0
         out.append(d)
     return jsonify(out)
@@ -322,7 +334,7 @@ def market_breakdown():
     con = get_db()
     rows = con.execute(
         """SELECT market_q, COUNT(*) as cnt, COALESCE(SUM(pnl), 0) as total_pnl,
-                  AVG(price) as avg_price, SUM(size) as volume
+                  AVG(price) as avg_price, SUM(COALESCE(notional_usdc, size)) as volume
            FROM trades WHERE status='filled'
            GROUP BY market_q ORDER BY total_pnl DESC"""
     ).fetchall()

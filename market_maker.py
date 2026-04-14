@@ -22,6 +22,9 @@ from typing import Optional
 import aiohttp
 import psycopg
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -40,6 +43,15 @@ def env_float(name: str, default: float) -> float:
     except ValueError:
         return default
 
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
 @dataclass
 class Config:
     # API endpoints
@@ -50,13 +62,17 @@ class Config:
     # Trading parameters
     SPREAD_PCT: float = 0.04       # Quote ±2% around fair price (captures 4% spread)
     MIN_EDGE: float   = 0.015      # Minimum edge over midpoint to place order
-    ORDER_SIZE: float = 50.0       # USDC per side per quote
+    ORDER_SIZE: float = 50.0       # USDC notional per side per quote
     MAX_POSITION: float = 500.0    # Max USDC in any single market
     QUOTE_REFRESH_SEC: int = 30    # How often to refresh quotes
     MARKETS_WATCHED: int = 10      # How many BTC markets to watch
     PAPER_FILL_BASE: float = 0.20  # Base fill probability in paper mode
     PAPER_INITIAL_BALANCE: float = field(default_factory=lambda: env_float("POLY_PAPER_INITIAL_BALANCE", 500.0))  # Paper account starting balance (USDC)
     FORCE_PAPER: bool = field(default_factory=lambda: env_bool("POLY_FORCE_PAPER", True))
+    EXECUTION_MODE: str = field(default_factory=lambda: os.getenv("POLY_EXECUTION_MODE", "paper").strip().lower())
+    ENABLE_LIVE_TRADING: bool = field(default_factory=lambda: env_bool("POLY_ENABLE_LIVE_TRADING", False))
+    MIN_ORDER_SHARES: float = field(default_factory=lambda: env_float("POLY_MIN_ORDER_SHARES", 5.0))
+    MAX_ORDERS_PER_CYCLE: int = field(default_factory=lambda: env_int("POLY_MAX_ORDERS_PER_CYCLE", 20))
 
     # Risk
     MAX_DAILY_LOSS: float = 200.0  # Kill switch: stop if daily PnL < -$200
@@ -77,6 +93,39 @@ class Config:
     )
 
 config = Config()
+live_client = None
+
+def is_live_mode() -> bool:
+    mode = config.EXECUTION_MODE
+    if mode not in {"paper", "live"}:
+        mode = "paper"
+    if config.FORCE_PAPER:
+        return False
+    return mode == "live"
+
+def validate_runtime_config():
+    if is_live_mode() and not config.ENABLE_LIVE_TRADING:
+        raise RuntimeError(
+            "Live mode requested but POLY_ENABLE_LIVE_TRADING is not enabled. "
+            "Set POLY_ENABLE_LIVE_TRADING=1 to allow real order placement."
+        )
+    if is_live_mode():
+        missing = []
+        for env_name, value in {
+            "POLY_PRIVATE_KEY": config.PRIVATE_KEY,
+            "POLY_API_KEY": config.API_KEY,
+            "POLY_API_SECRET": config.API_SECRET,
+            "POLY_PASSPHRASE": config.API_PASSPHRASE,
+        }.items():
+            if not value:
+                missing.append(env_name)
+        if missing:
+            raise RuntimeError(f"Missing required live trading credentials: {', '.join(missing)}")
+
+def notional_to_shares(notional_usdc: float, price: float) -> float:
+    if notional_usdc <= 0:
+        return 0.0
+    return round(notional_usdc / max(price, 0.01), 6)
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -105,9 +154,12 @@ def init_db(database_url: str):
             market_slug TEXT,
             event_slug  TEXT,
             market_q    TEXT,
+            mode        TEXT    DEFAULT 'paper',
             side        TEXT    NOT NULL,
             price       REAL    NOT NULL,
             size        REAL    NOT NULL,
+            notional_usdc REAL,
+            size_shares REAL,
             order_id    TEXT,
             status      TEXT    DEFAULT 'open',
             pnl         REAL    DEFAULT 0,
@@ -116,6 +168,9 @@ def init_db(database_url: str):
     """)
     con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS market_slug TEXT")
     con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS event_slug TEXT")
+    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS mode TEXT DEFAULT 'paper'")
+    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS notional_usdc REAL")
+    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS size_shares REAL")
     con.execute("""
         CREATE TABLE IF NOT EXISTS quotes (
             id          BIGSERIAL PRIMARY KEY,
@@ -497,6 +552,25 @@ async def compute_quote(session: aiohttp.ClientSession, market: Market) -> Optio
 
 # ─── Order Placement (Authenticated) ──────────────────────────────────────────
 
+def get_live_client():
+    global live_client
+    if live_client is not None:
+        return live_client
+    from py_clob_client.client import ClobClient
+    from py_clob_client.constants import POLYGON
+
+    live_client = ClobClient(
+        host=config.CLOB_API,
+        chain_id=POLYGON,
+        key=config.PRIVATE_KEY,
+        creds={
+            "api_key": config.API_KEY,
+            "api_secret": config.API_SECRET,
+            "api_passphrase": config.API_PASSPHRASE,
+        }
+    )
+    return live_client
+
 async def place_order(
     session: aiohttp.ClientSession,
     token_id: str,
@@ -514,21 +588,29 @@ async def place_order(
 
     In PAPER TRADING mode (no keys set), this simulates order placement.
     """
-    paper_mode = config.FORCE_PAPER or not config.PRIVATE_KEY
+    paper_mode = not is_live_mode()
     state.paper_mode = paper_mode
 
     order_id = f"sim_{int(time.time()*1000)}_{side[:1]}"
+    notional_usdc = float(size)
+    reference_price = mid if mid is not None else price
+    size_shares = notional_to_shares(notional_usdc, reference_price)
+    if size_shares < config.MIN_ORDER_SHARES:
+        log.debug(
+            f"Skip tiny order size_shares={size_shares:.6f} below minimum {config.MIN_ORDER_SHARES:.6f}"
+        )
+        return None
 
     def clamp(v: float, lo: float, hi: float) -> float:
         return max(lo, min(hi, v))
 
-    def apply_fill_pnl(market_id: str, fill_side: str, fill_price: float, usdc_size: float) -> float:
+    def apply_fill_pnl(market_id: str, fill_side: str, fill_price: float, shares: float) -> float:
         """
         Inventory accounting on YES shares:
         shares = usdc_notional / price
         realized PnL appears when reducing an existing long/short.
         """
-        qty = usdc_size / max(fill_price, 0.01)
+        qty = shares
         pos = state.open_positions.get(market_id, {"qty": 0.0, "avg_price": 0.0})
         cur_qty = float(pos["qty"])
         cur_avg = float(pos["avg_price"])
@@ -590,21 +672,21 @@ async def place_order(
         fill_price = price if is_filled else None
         trade_pnl = 0.0
         if is_filled:
-            trade_pnl = apply_fill_pnl(market.condition_id, side, price, size)
+            trade_pnl = apply_fill_pnl(market.condition_id, side, price, size_shares)
             state.realized_pnl += trade_pnl
             refresh_account_state()
 
         log.info(
-            f"[PAPER] {side} {size:.1f} {market.question[:40]}... @ {price:.3f} "
-            f"status={status} fill_prob={fill_prob:.2f} pnl={trade_pnl:+.2f}"
+            f"[PAPER] {side} ${notional_usdc:.2f} ({size_shares:.4f} shares) "
+            f"{market.question[:40]}... @ {price:.3f} status={status} fill_prob={fill_prob:.2f} pnl={trade_pnl:+.2f}"
         )
         state.total_trades += 1
         db.execute(
-            """INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,side,price,size,order_id,status,pnl,fill_price)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            """INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,mode,side,price,size,notional_usdc,size_shares,order_id,status,pnl,fill_price)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (datetime.now(timezone.utc),
              market.condition_id, market.slug, market.event_slug, market.question,
-             side, price, size, order_id, status, trade_pnl, fill_price)
+             "paper", side, price, notional_usdc, notional_usdc, size_shares, order_id, status, trade_pnl, fill_price)
         )
         db.commit()
         return order_id
@@ -612,25 +694,13 @@ async def place_order(
     # --- Live trading via py-clob-client ---
     # Install: pip install py-clob-client
     try:
-        from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import OrderArgs, OrderType
-        from py_clob_client.constants import POLYGON
-
-        client = ClobClient(
-            host=config.CLOB_API,
-            chain_id=POLYGON,
-            key=config.PRIVATE_KEY,
-            creds={
-                "api_key": config.API_KEY,
-                "api_secret": config.API_SECRET,
-                "api_passphrase": config.API_PASSPHRASE,
-            }
-        )
+        client = get_live_client()
 
         order_args = OrderArgs(
             token_id=token_id,
             price=price,
-            size=size,
+            size=size_shares,
             side=side,
             order_type=OrderType.GTC,
         )
@@ -639,18 +709,23 @@ async def place_order(
 
         state.total_trades += 1
         db.execute(
-            """INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,side,price,size,order_id,status)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            """INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,mode,side,price,size,notional_usdc,size_shares,order_id,status)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (datetime.now(timezone.utc),
              market.condition_id, market.slug, market.event_slug, market.question,
-             side, price, size, real_id, "open")
+             "live", side, price, notional_usdc, notional_usdc, size_shares, real_id, "open")
         )
         db.commit()
-        log.info(f"[LIVE] {side} {size:.1f} @ {price:.3f} order_id={real_id[:16]}")
+        log.info(
+            f"[LIVE] {side} ${notional_usdc:.2f} ({size_shares:.4f} shares) "
+            f"@ {price:.3f} order_id={real_id[:16]}"
+        )
         return real_id
 
     except ImportError:
-        log.warning("py-clob-client not installed. Run: pip install py-clob-client")
+        log.critical("py-clob-client not installed. Live trading cannot run.")
+        if is_live_mode():
+            state.kill_switch = True
         return None
     except Exception as e:
         log.error(f"Order placement failed: {e}")
@@ -701,12 +776,14 @@ async def main_loop():
     log.info("=" * 60)
     log.info("  Polymarket Market Making Bot  |  Starting up...")
     log.info("=" * 60)
-    state.paper_mode = config.FORCE_PAPER or not bool(config.PRIVATE_KEY)
+    validate_runtime_config()
+    state.paper_mode = not is_live_mode()
     state.starting_balance = config.PAPER_INITIAL_BALANCE
     refresh_account_state()
     log.info(
         f"Config: spread={config.SPREAD_PCT*100:.1f}%  min_edge={config.MIN_EDGE*100:.1f}%  "
-        f"size=${config.ORDER_SIZE}  paper={state.paper_mode}  starting_balance=${state.starting_balance:.2f}"
+        f"notional=${config.ORDER_SIZE} mode={'paper' if state.paper_mode else 'live'} "
+        f"starting_balance=${state.starting_balance:.2f}"
     )
 
     async with aiohttp.ClientSession() as session:
@@ -755,6 +832,11 @@ async def main_loop():
                                         "Skipping new quote."
                                     )
                                     continue
+                            if placed_count >= config.MAX_ORDERS_PER_CYCLE:
+                                log.info(
+                                    f"Max orders per cycle reached ({config.MAX_ORDERS_PER_CYCLE}), stopping quote placement"
+                                )
+                                break
                             # Place bid + ask
                             await place_order(
                                 session,
@@ -780,10 +862,11 @@ async def main_loop():
                             await asyncio.sleep(0.3)  # Rate limit
 
                     log.info(f"Placed quotes on {placed_count} markets this cycle")
-                    log.info(
-                        f"Paper account: start=${state.starting_balance:.2f} "
-                        f"equity=${state.equity:.2f} realized={state.realized_pnl:+.2f} exposure=${get_total_exposure():.2f}"
-                    )
+                    if state.paper_mode:
+                        log.info(
+                            f"Paper account: start=${state.starting_balance:.2f} "
+                            f"equity=${state.equity:.2f} realized={state.realized_pnl:+.2f} exposure=${get_total_exposure():.2f}"
+                        )
 
                 # 5. Update stats
                 update_stats()

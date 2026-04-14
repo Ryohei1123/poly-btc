@@ -750,7 +750,7 @@ async function loadTrades() {
       <td class="side-${t.side.toLowerCase()}">${t.side}</td>
       <td>${(+(t.price_cents || 0)).toFixed(2)}c</td>
       <td>${(+t.contracts).toLocaleString('en', {maximumFractionDigits:2})}</td>
-      <td>$${(+t.size).toFixed(0)}</td>
+      <td>$${(+(t.notional_usdc || t.size || 0)).toFixed(0)}</td>
       <td class="${(+t.pnl)>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(+t.pnl)} <span style="font-size:10px;opacity:0.8">(${(+t.return_pct).toFixed(2)}%)</span></td>
       <td>${
         t.market_url

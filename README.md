@@ -43,6 +43,9 @@ Paper mode defaults:
 Create a `.env` file:
 ```
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/polybot
+POLY_FORCE_PAPER=0
+POLY_EXECUTION_MODE=live
+POLY_ENABLE_LIVE_TRADING=1
 POLY_PRIVATE_KEY=0x_your_polygon_wallet_private_key
 POLY_API_KEY=your_clob_api_key
 POLY_API_SECRET=your_clob_api_secret
@@ -111,8 +114,12 @@ Edit `market_maker.py` → `Config` class:
 
 Runtime env vars:
 - `DATABASE_URL=postgresql://...` sets PostgreSQL connection
-- `POLY_FORCE_PAPER=1` keeps bot in paper mode even if keys exist
+- `POLY_EXECUTION_MODE=paper|live` chooses execution mode
+- `POLY_FORCE_PAPER=1` forces paper mode even if live mode is configured
+- `POLY_ENABLE_LIVE_TRADING=1` is required for real orders in live mode
 - `POLY_PAPER_INITIAL_BALANCE=500` sets paper account starting balance
+- `POLY_MIN_ORDER_SHARES` minimum share size guard
+- `POLY_MAX_ORDERS_PER_CYCLE` per-cycle order throttle
 
 ## Run 24/7 (Linux)
 
