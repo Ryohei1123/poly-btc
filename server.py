@@ -14,6 +14,7 @@ import psycopg
 from psycopg.rows import dict_row
 from flask import Flask, jsonify, send_from_directory, g
 from dotenv import load_dotenv
+from db_schema import apply_schema
 
 load_dotenv()
 
@@ -38,47 +39,7 @@ def close_db(_exc):
 def ensure_db():
     """Create DB schema. Demo data is optional via POLYBOT_SEED_DEMO=1."""
     con = psycopg.connect(DATABASE_URL, row_factory=dict_row)
-    con.execute("""CREATE TABLE IF NOT EXISTS trades (
-        id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ, market_id TEXT,
-        market_slug TEXT, event_slug TEXT, market_q TEXT, side TEXT, price REAL, size REAL,
-        order_id TEXT, status TEXT DEFAULT 'open', pnl REAL DEFAULT 0, fill_price REAL
-    )""")
-    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS market_slug TEXT")
-    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS event_slug TEXT")
-    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS mode TEXT DEFAULT 'paper'")
-    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS notional_usdc REAL")
-    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS size_shares REAL")
-    con.execute("""CREATE TABLE IF NOT EXISTS quotes (
-        id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ, market_id TEXT,
-        bid REAL, ask REAL, fair_price REAL, mid REAL, edge REAL, placed INTEGER DEFAULT 0
-    )""")
-    con.execute("""CREATE TABLE IF NOT EXISTS btc_prices (ts TIMESTAMPTZ PRIMARY KEY, price REAL)""")
-    con.execute("""CREATE TABLE IF NOT EXISTS bot_stats (
-        ts TIMESTAMPTZ PRIMARY KEY, total_trades INTEGER DEFAULT 0,
-        open_positions INTEGER DEFAULT 0, realized_pnl REAL DEFAULT 0,
-        unrealized_pnl REAL DEFAULT 0, daily_pnl REAL DEFAULT 0,
-        balance REAL DEFAULT 0, active_markets INTEGER DEFAULT 0
-    )""")
-    con.execute("""CREATE TABLE IF NOT EXISTS runtime_state (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        updated_at TIMESTAMPTZ NOT NULL,
-        running INTEGER DEFAULT 1,
-        kill_switch INTEGER DEFAULT 0,
-        paper_mode INTEGER DEFAULT 1,
-        btc_price REAL DEFAULT 0,
-        btc_source TEXT DEFAULT 'ref',
-        ws_connected INTEGER DEFAULT 0,
-        ws_tick_age_sec REAL DEFAULT 0,
-        cycle_latency_ms REAL DEFAULT 0,
-        orders_placed_cycle INTEGER DEFAULT 0,
-        last_cycle TEXT DEFAULT '',
-        errors INTEGER DEFAULT 0
-    )""")
-    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS btc_source TEXT DEFAULT 'ref'")
-    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS ws_connected INTEGER DEFAULT 0")
-    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS ws_tick_age_sec REAL DEFAULT 0")
-    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS cycle_latency_ms REAL DEFAULT 0")
-    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS orders_placed_cycle INTEGER DEFAULT 0")
+    apply_schema(con)
 
     # Seed demo data only when explicitly requested.
     count = con.execute("SELECT COUNT(*) AS cnt FROM trades").fetchone()["cnt"]
@@ -152,6 +113,23 @@ def fmt_ts(value):
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%dT%H:%M")
     return str(value)[:16]
+
+def market_url_from_slugs(market_slug: str, event_slug: str):
+    market_slug = (market_slug or "").strip()
+    event_slug = (event_slug or "").strip()
+    if market_slug:
+        return f"https://polymarket.com/market/{market_slug}"
+    if event_slug:
+        return f"https://polymarket.com/event/{event_slug}"
+    return None
+
+def rows_with_formatted_ts(rows):
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["ts"] = fmt_ts(d.get("ts"))
+        out.append(d)
+    return out
 
 def resolve_event_slug(market_slug: str) -> str:
     """
@@ -310,10 +288,8 @@ def recent_trades():
         """SELECT ts, market_id, market_slug, event_slug, market_q, mode, side, price, size, notional_usdc, size_shares, pnl, status
            FROM trades ORDER BY ts DESC LIMIT 75"""
     ).fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["ts"] = fmt_ts(d.get("ts"))
+    out = rows_with_formatted_ts(rows)
+    for d in out:
         event_slug = (d.get("event_slug") or "").strip()
         market_slug = (d.get("market_slug") or "").strip()
         if not event_slug and market_slug:
@@ -328,12 +304,7 @@ def recent_trades():
                     con.commit()
                 except Exception:
                     pass
-        if market_slug:
-            d["market_url"] = f"https://polymarket.com/market/{market_slug}"
-        elif event_slug:
-            d["market_url"] = f"https://polymarket.com/event/{event_slug}"
-        else:
-            d["market_url"] = None
+        d["market_url"] = market_url_from_slugs(market_slug, event_slug)
         price = float(d.get("price") or 0.0)
         size = float(d.get("notional_usdc") or d.get("size") or 0.0)
         shares = float(d.get("size_shares") or 0.0)
@@ -376,12 +347,7 @@ def recent_quotes():
         """SELECT ts, market_id, bid, ask, fair_price, mid, edge, placed
            FROM quotes ORDER BY ts DESC LIMIT 30"""
     ).fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["ts"] = fmt_ts(d.get("ts"))
-        out.append(d)
-    return jsonify(out)
+    return jsonify(rows_with_formatted_ts(rows))
 
 @app.route("/api/hourly_pnl")
 def hourly_pnl():

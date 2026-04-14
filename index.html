@@ -540,11 +540,19 @@
 let pnlChart, btcChart, hourlyChart;
 let autoRefreshOn = true;
 let autoTimer;
+const el = id => document.getElementById(id);
 
 const CHART_DEFAULTS = {
   borderWidth: 2,
   pointRadius: 0,
   tension: 0.4,
+};
+
+const PILL_THEMES = {
+  green: { border: 'rgba(0,229,160,0.25)', bg: 'rgba(0,229,160,0.08)', color: 'var(--green)' },
+  yellow: { border: 'rgba(247,195,85,0.25)', bg: 'rgba(247,195,85,0.08)', color: 'var(--yellow)' },
+  red: { border: 'rgba(255,77,106,0.25)', bg: 'rgba(255,77,106,0.08)', color: 'var(--red)' },
+  blue: { border: 'rgba(77,159,255,0.25)', bg: 'rgba(77,159,255,0.08)', color: 'var(--blue)' },
 };
 
 function makeGradient(ctx, color) {
@@ -554,18 +562,26 @@ function makeGradient(ctx, color) {
   return g;
 }
 
-// ─── PnL Curve Chart ─────────────────────────────────────────────────────────
-function initPnlChart(labels, values) {
-  const ctx = document.getElementById('pnl-chart').getContext('2d');
-  const grad = makeGradient(ctx, '#00e5a0');
-  pnlChart = new Chart(ctx, {
+function applyPillTheme(pillEl, dotEl, textEl, textValue, theme) {
+  const palette = PILL_THEMES[theme];
+  textEl.textContent = textValue;
+  pillEl.style.borderColor = palette.border;
+  pillEl.style.background = palette.bg;
+  pillEl.style.color = palette.color;
+  dotEl.style.background = palette.color;
+}
+
+function initLineChart({ canvasId, labels, values, lineColor, datasetLabel, xTicks, tickSize }) {
+  const ctx = el(canvasId).getContext('2d');
+  const grad = makeGradient(ctx, lineColor);
+  return new Chart(ctx, {
     type: 'line',
     data: {
       labels,
       datasets: [{
-        label: 'PnL ($)',
+        label: datasetLabel,
         data: values,
-        borderColor: '#00e5a0',
+        borderColor: lineColor,
         backgroundColor: grad,
         fill: true,
         ...CHART_DEFAULTS,
@@ -579,42 +595,36 @@ function initPnlChart(labels, values) {
         callbacks: { label: ctx => ' $' + ctx.raw.toLocaleString('en', {maximumFractionDigits:0}) }
       }},
       scales: {
-        x: { ticks: { color:'#3d5270', maxTicksLimit:8, font:{family:'JetBrains Mono',size:10} }, grid: { color:'#1d2d45' } },
-        y: { ticks: { color:'#3d5270', font:{family:'JetBrains Mono',size:10}, callback: v=>'$'+v.toLocaleString() }, grid: { color:'#1d2d45' } }
+        x: { ticks: { color:'#3d5270', maxTicksLimit:xTicks, font:{family:'JetBrains Mono',size:tickSize} }, grid: { color:'#1d2d45' } },
+        y: { ticks: { color:'#3d5270', font:{family:'JetBrains Mono',size:tickSize}, callback: v=>'$'+v.toLocaleString() }, grid: { color:'#1d2d45' } }
       }
     }
   });
 }
 
+// ─── PnL Curve Chart ─────────────────────────────────────────────────────────
+function initPnlChart(labels, values) {
+  pnlChart = initLineChart({
+    canvasId: 'pnl-chart',
+    labels,
+    values,
+    lineColor: '#00e5a0',
+    datasetLabel: 'PnL ($)',
+    xTicks: 8,
+    tickSize: 10,
+  });
+}
+
 // ─── BTC Chart ────────────────────────────────────────────────────────────────
 function initBtcChart(labels, values) {
-  const ctx = document.getElementById('btc-chart').getContext('2d');
-  const grad = makeGradient(ctx, '#f7c355');
-  btcChart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        label: 'BTC ($)',
-        data: values,
-        borderColor: '#f7c355',
-        backgroundColor: grad,
-        fill: true,
-        ...CHART_DEFAULTS,
-      }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false }, tooltip: {
-        backgroundColor: '#0d1420', borderColor: '#1d2d45', borderWidth: 1,
-        titleColor: '#7a92b5', bodyColor: '#e2eaf5',
-        callbacks: { label: ctx => ' $' + ctx.raw.toLocaleString('en',{maximumFractionDigits:0}) }
-      }},
-      scales: {
-        x: { ticks: { color:'#3d5270', maxTicksLimit:6, font:{family:'JetBrains Mono',size:9} }, grid: { color:'#1d2d45' } },
-        y: { ticks: { color:'#3d5270', font:{family:'JetBrains Mono',size:9}, callback: v=>'$'+v.toLocaleString() }, grid: { color:'#1d2d45' } }
-      }
-    }
+  btcChart = initLineChart({
+    canvasId: 'btc-chart',
+    labels,
+    values,
+    lineColor: '#f7c355',
+    datasetLabel: 'BTC ($)',
+    xTicks: 6,
+    tickSize: 9,
   });
 }
 
@@ -676,12 +686,12 @@ function truncate(s, n) {
 
 async function loadStatus() {
   const d = await fetchJSON('/api/status');
-  const statusText = document.getElementById('status-text');
-  const statusPill = document.getElementById('status-pill');
-  const wsPill = document.getElementById('ws-pill');
-  const wsText = document.getElementById('ws-text');
-  const opsText = document.getElementById('ops-text');
-  const modeLabel = document.getElementById('mode-label');
+  const statusText = el('status-text');
+  const statusPill = el('status-pill');
+  const wsPill = el('ws-pill');
+  const wsText = el('ws-text');
+  const opsText = el('ops-text');
+  const modeLabel = el('mode-label');
   const dot = statusPill.querySelector('.dot');
   const wsDot = wsPill.querySelector('.dot');
 
@@ -689,40 +699,20 @@ async function loadStatus() {
   modeLabel.style.color = d.paper_mode ? 'var(--yellow)' : 'var(--green)';
 
   if (!d.running || !d.healthy) {
-    statusText.textContent = 'IDLE';
-    statusPill.style.borderColor = 'rgba(247,195,85,0.25)';
-    statusPill.style.background = 'rgba(247,195,85,0.08)';
-    statusPill.style.color = 'var(--yellow)';
-    dot.style.background = 'var(--yellow)';
+    applyPillTheme(statusPill, dot, statusText, 'IDLE', 'yellow');
   } else if (d.kill_switch) {
-    statusText.textContent = 'KILL';
-    statusPill.style.borderColor = 'rgba(255,77,106,0.25)';
-    statusPill.style.background = 'rgba(255,77,106,0.08)';
-    statusPill.style.color = 'var(--red)';
-    dot.style.background = 'var(--red)';
+    applyPillTheme(statusPill, dot, statusText, 'KILL', 'red');
   } else {
-    statusText.textContent = 'LIVE';
-    statusPill.style.borderColor = 'rgba(0,229,160,0.25)';
-    statusPill.style.background = 'rgba(0,229,160,0.08)';
-    statusPill.style.color = 'var(--green)';
-    dot.style.background = 'var(--green)';
+    applyPillTheme(statusPill, dot, statusText, 'LIVE', 'green');
   }
 
   const wsConnected = Boolean(d.ws_connected);
   const wsAge = (d.ws_tick_age_sec == null) ? null : Number(d.ws_tick_age_sec);
   const source = (d.btc_source || 'ref').toUpperCase();
   if (wsConnected && wsAge !== null && wsAge <= 15) {
-    wsText.textContent = `WS ${source} ${wsAge.toFixed(1)}s`;
-    wsPill.style.borderColor = 'rgba(77,159,255,0.25)';
-    wsPill.style.background = 'rgba(77,159,255,0.08)';
-    wsPill.style.color = 'var(--blue)';
-    wsDot.style.background = 'var(--blue)';
+    applyPillTheme(wsPill, wsDot, wsText, `WS ${source} ${wsAge.toFixed(1)}s`, 'blue');
   } else {
-    wsText.textContent = `WS OFF ${source}`;
-    wsPill.style.borderColor = 'rgba(247,195,85,0.25)';
-    wsPill.style.background = 'rgba(247,195,85,0.08)';
-    wsPill.style.color = 'var(--yellow)';
-    wsDot.style.background = 'var(--yellow)';
+    applyPillTheme(wsPill, wsDot, wsText, `WS OFF ${source}`, 'yellow');
   }
 
   const ordersPlaced = Number(d.orders_placed_cycle || 0);
@@ -743,31 +733,31 @@ async function loadSummary() {
   const roiPct = Number(d.roi_pct || 0);
   const startingBalance = Number(d.starting_balance || 0);
 
-  document.getElementById('stat-pnl').textContent = fmtPnl(realizedPnl);
-  document.getElementById('stat-pnl').style.color = realizedPnl >= 0 ? 'var(--green)' : 'var(--red)';
-  document.getElementById('stat-pnl-sub').textContent = `Equity: $${equity.toLocaleString('en', {maximumFractionDigits:2})} | ROI: ${roiPct.toFixed(2)}%`;
-  document.getElementById('stat-trades').textContent = totalTrades.toLocaleString();
-  document.getElementById('stat-trades-sub').textContent = `${openOrders} open orders | Start: $${startingBalance.toFixed(0)}`;
-  document.getElementById('stat-daily').textContent = fmtPnl(dailyPnl);
-  document.getElementById('stat-daily').style.color = dailyPnl >= 0 ? 'var(--green)' : 'var(--red)';
-  document.getElementById('stat-wr').textContent = winRate + '%';
-  document.getElementById('stat-wr-sub').textContent = `${activeMarkets} active markets`;
-  document.getElementById('btc-badge').textContent = 'BTC $' + btcPrice.toLocaleString('en',{maximumFractionDigits:0});
-  document.getElementById('btc-badge2').textContent = '$' + btcPrice.toLocaleString('en',{maximumFractionDigits:0});
-  document.getElementById('trades-badge').textContent = totalTrades + ' total';
+  el('stat-pnl').textContent = fmtPnl(realizedPnl);
+  el('stat-pnl').style.color = realizedPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  el('stat-pnl-sub').textContent = `Equity: $${equity.toLocaleString('en', {maximumFractionDigits:2})} | ROI: ${roiPct.toFixed(2)}%`;
+  el('stat-trades').textContent = totalTrades.toLocaleString();
+  el('stat-trades-sub').textContent = `${openOrders} open orders | Start: $${startingBalance.toFixed(0)}`;
+  el('stat-daily').textContent = fmtPnl(dailyPnl);
+  el('stat-daily').style.color = dailyPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  el('stat-wr').textContent = winRate + '%';
+  el('stat-wr-sub').textContent = `${activeMarkets} active markets`;
+  el('btc-badge').textContent = 'BTC $' + btcPrice.toLocaleString('en',{maximumFractionDigits:0});
+  el('btc-badge2').textContent = '$' + btcPrice.toLocaleString('en',{maximumFractionDigits:0});
+  el('trades-badge').textContent = totalTrades + ' total';
 
   // Ring
   const pct = winRate;
-  document.getElementById('ring-pct').textContent = pct + '%';
+  el('ring-pct').textContent = pct + '%';
   const circ = 2 * Math.PI * 36;
-  document.getElementById('ring-circle').setAttribute('stroke-dashoffset', circ * (1 - pct/100));
+  el('ring-circle').setAttribute('stroke-dashoffset', circ * (1 - pct/100));
 }
 
 async function loadPnlCurve() {
   const data = await fetchJSON('/api/pnl_curve');
   if (!data.length) {
     if (pnlChart) updateChart(pnlChart, [], []);
-    document.getElementById('pnl-badge').textContent = '$0';
+    el('pnl-badge').textContent = '$0';
     return;
   }
   const labels = data.map(d => d.ts.slice(5,16));
@@ -775,7 +765,7 @@ async function loadPnlCurve() {
   if (!pnlChart) initPnlChart(labels, values);
   else updateChart(pnlChart, labels, values);
   const last = values[values.length-1];
-  document.getElementById('pnl-badge').textContent = '$' + (last||0).toLocaleString('en',{maximumFractionDigits:0});
+  el('pnl-badge').textContent = '$' + (last||0).toLocaleString('en',{maximumFractionDigits:0});
 }
 
 async function loadBtc() {
@@ -788,7 +778,7 @@ async function loadBtc() {
 
 async function loadTrades() {
   const data = await fetchJSON('/api/trades/recent');
-  const tbody = document.getElementById('trades-body');
+  const tbody = el('trades-body');
   if (!data.length) {
     tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">No trades yet</td></tr>';
     return;
@@ -818,12 +808,12 @@ async function loadTrades() {
 async function loadMarkets() {
   const data = await fetchJSON('/api/trades/markets');
   if (!data.length) {
-    document.getElementById('markets-breakdown').innerHTML =
+    el('markets-breakdown').innerHTML =
       '<div style="color:var(--text3);font-family:var(--mono);font-size:11px">No filled trades yet</div>';
     return;
   }
   const maxPnl = Math.max(...data.map(d => Math.abs(+d.total_pnl)));
-  document.getElementById('markets-breakdown').innerHTML = data.slice(0,6).map(m => `
+  el('markets-breakdown').innerHTML = data.slice(0,6).map(m => `
     <div class="market-item">
       <div class="market-label" title="${m.market_q||''}">${truncate(m.market_q||'—', 22)}</div>
       <div class="market-bar-wrap">
@@ -844,7 +834,7 @@ async function loadHourly() {
 
 async function loadQuotes() {
   const data = await fetchJSON('/api/quotes/recent');
-  document.getElementById('quotes-body').innerHTML = data.map(q => `
+  el('quotes-body').innerHTML = data.map(q => `
     <div class="quote-row">
       <span style="color:var(--text2);overflow:hidden;text-overflow:ellipsis">${truncate(q.market_id||'—', 16)}</span>
       <span style="color:var(--yellow)">${(+q.fair_price).toFixed(3)}</span>
@@ -858,9 +848,9 @@ async function loadQuotes() {
 async function loadLogs() {
   try {
     const data = await fetchJSON('/api/logs');
-    const el = document.getElementById('log-output');
+    const logEl = el('log-output');
     if (data.lines && data.lines.length) {
-      el.innerHTML = data.lines.map(line => {
+      logEl.innerHTML = data.lines.map(line => {
         let cls = 'log-line';
         if (line.includes('ERROR') || line.includes('CRIT')) cls += ' error';
         else if (line.includes('WARNING') || line.includes('WARN')) cls += ' warning';
@@ -868,18 +858,18 @@ async function loadLogs() {
         else cls += ' info';
         return `<div class="${cls}">${line}</div>`;
       }).join('');
-      el.scrollTop = el.scrollHeight;
+      logEl.scrollTop = logEl.scrollHeight;
     }
   } catch(e) {
     // Log file not found yet — show placeholder
-    document.getElementById('log-output').innerHTML =
+    el('log-output').innerHTML =
       '<div class="log-line info">Bot not started yet. Run: python market_maker.py</div>';
   }
 }
 
 // ─── Refresh all ─────────────────────────────────────────────────────────────
 async function refreshAll() {
-  document.getElementById('last-update').textContent = 'Refreshing…';
+  el('last-update').textContent = 'Refreshing…';
   await Promise.all([
     loadStatus(),
     loadSummary(),
@@ -891,12 +881,12 @@ async function refreshAll() {
     loadQuotes(),
     loadLogs(),
   ]);
-  document.getElementById('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  el('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
 }
 
 function toggleAutoRefresh() {
   autoRefreshOn = !autoRefreshOn;
-  document.getElementById('auto-label').textContent = autoRefreshOn ? 'ON' : 'OFF';
+  el('auto-label').textContent = autoRefreshOn ? 'ON' : 'OFF';
   if (autoRefreshOn) startAutoRefresh();
   else clearInterval(autoTimer);
 }

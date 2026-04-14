@@ -24,34 +24,29 @@ import aiohttp
 import psycopg
 from pathlib import Path
 from dotenv import load_dotenv
+from db_schema import apply_schema
 
 load_dotenv()
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-def env_bool(name: str, default: bool) -> bool:
+def env_value(name: str, default, parser):
     raw = os.getenv(name)
     if raw is None:
         return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        return parser(raw)
+    except (TypeError, ValueError):
+        return default
+
+def env_bool(name: str, default: bool) -> bool:
+    return env_value(name, default, lambda v: v.strip().lower() in {"1", "true", "yes", "on"})
 
 def env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
+    return env_value(name, default, float)
 
 def env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+    return env_value(name, default, int)
 
 @dataclass
 class Config:
@@ -152,84 +147,7 @@ log = logging.getLogger("polybot")
 
 def init_db(database_url: str):
     con = psycopg.connect(database_url, autocommit=False)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS trades (
-            id          BIGSERIAL PRIMARY KEY,
-            ts          TIMESTAMPTZ NOT NULL,
-            market_id   TEXT    NOT NULL,
-            market_slug TEXT,
-            event_slug  TEXT,
-            market_q    TEXT,
-            mode        TEXT    DEFAULT 'paper',
-            side        TEXT    NOT NULL,
-            price       REAL    NOT NULL,
-            size        REAL    NOT NULL,
-            notional_usdc REAL,
-            size_shares REAL,
-            order_id    TEXT,
-            status      TEXT    DEFAULT 'open',
-            pnl         REAL    DEFAULT 0,
-            fill_price  REAL
-        )
-    """)
-    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS market_slug TEXT")
-    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS event_slug TEXT")
-    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS mode TEXT DEFAULT 'paper'")
-    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS notional_usdc REAL")
-    con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS size_shares REAL")
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS quotes (
-            id          BIGSERIAL PRIMARY KEY,
-            ts          TIMESTAMPTZ NOT NULL,
-            market_id   TEXT    NOT NULL,
-            bid         REAL,
-            ask         REAL,
-            fair_price  REAL,
-            mid         REAL,
-            edge        REAL,
-            placed      INTEGER DEFAULT 0
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS btc_prices (
-            ts    TIMESTAMPTZ PRIMARY KEY,
-            price REAL NOT NULL
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS bot_stats (
-            ts              TIMESTAMPTZ PRIMARY KEY,
-            total_trades    INTEGER DEFAULT 0,
-            open_positions  INTEGER DEFAULT 0,
-            realized_pnl    REAL    DEFAULT 0,
-            unrealized_pnl  REAL    DEFAULT 0,
-            daily_pnl       REAL    DEFAULT 0,
-            balance         REAL    DEFAULT 0,
-            active_markets  INTEGER DEFAULT 0
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS runtime_state (
-            id              INTEGER PRIMARY KEY CHECK (id = 1),
-            updated_at      TIMESTAMPTZ NOT NULL,
-            running         INTEGER DEFAULT 1,
-            kill_switch     INTEGER DEFAULT 0,
-            paper_mode      INTEGER DEFAULT 1,
-            btc_price       REAL DEFAULT 0,
-            btc_source      TEXT DEFAULT 'ref',
-            ws_connected    INTEGER DEFAULT 0,
-            ws_tick_age_sec REAL DEFAULT 0,
-            cycle_latency_ms REAL DEFAULT 0,
-            orders_placed_cycle INTEGER DEFAULT 0,
-            last_cycle      TEXT DEFAULT '',
-            errors          INTEGER DEFAULT 0
-        )
-    """)
-    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS btc_source TEXT DEFAULT 'ref'")
-    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS ws_connected INTEGER DEFAULT 0")
-    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS ws_tick_age_sec REAL DEFAULT 0")
-    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS cycle_latency_ms REAL DEFAULT 0")
-    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS orders_placed_cycle INTEGER DEFAULT 0")
+    apply_schema(con)
     con.commit()
     return con
 
@@ -705,6 +623,43 @@ def get_live_client():
     )
     return live_client
 
+def persist_trade(
+    market: Market,
+    mode: str,
+    side: str,
+    price: float,
+    notional_usdc: float,
+    size_shares: float,
+    order_id: str,
+    status: str,
+    pnl: float = 0.0,
+    fill_price: Optional[float] = None,
+) -> None:
+    """Persist a trade event with a consistent schema across modes."""
+    db.execute(
+        """INSERT INTO trades
+           (ts,market_id,market_slug,event_slug,market_q,mode,side,price,size,notional_usdc,size_shares,order_id,status,pnl,fill_price)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (
+            datetime.now(timezone.utc),
+            market.condition_id,
+            market.slug,
+            market.event_slug,
+            market.question,
+            mode,
+            side,
+            price,
+            notional_usdc,
+            notional_usdc,
+            size_shares,
+            order_id,
+            status,
+            pnl,
+            fill_price,
+        ),
+    )
+    db.commit()
+
 async def place_order(
     session: aiohttp.ClientSession,
     token_id: str,
@@ -815,14 +770,18 @@ async def place_order(
             f"{market.question[:40]}... @ {price:.3f} status={status} fill_prob={fill_prob:.2f} pnl={trade_pnl:+.2f}"
         )
         state.total_trades += 1
-        db.execute(
-            """INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,mode,side,price,size,notional_usdc,size_shares,order_id,status,pnl,fill_price)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (datetime.now(timezone.utc),
-             market.condition_id, market.slug, market.event_slug, market.question,
-             "paper", side, price, notional_usdc, notional_usdc, size_shares, order_id, status, trade_pnl, fill_price)
+        persist_trade(
+            market=market,
+            mode="paper",
+            side=side,
+            price=price,
+            notional_usdc=notional_usdc,
+            size_shares=size_shares,
+            order_id=order_id,
+            status=status,
+            pnl=trade_pnl,
+            fill_price=fill_price,
         )
-        db.commit()
         return order_id
 
     # --- Live trading via py-clob-client ---
@@ -842,14 +801,16 @@ async def place_order(
         real_id = resp.get("orderID", order_id)
 
         state.total_trades += 1
-        db.execute(
-            """INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,mode,side,price,size,notional_usdc,size_shares,order_id,status)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (datetime.now(timezone.utc),
-             market.condition_id, market.slug, market.event_slug, market.question,
-             "live", side, price, notional_usdc, notional_usdc, size_shares, real_id, "open")
+        persist_trade(
+            market=market,
+            mode="live",
+            side=side,
+            price=price,
+            notional_usdc=notional_usdc,
+            size_shares=size_shares,
+            order_id=real_id,
+            status="open",
         )
-        db.commit()
         log.info(
             f"[LIVE] {side} ${notional_usdc:.2f} ({size_shares:.4f} shares) "
             f"@ {price:.3f} order_id={real_id[:16]}"
