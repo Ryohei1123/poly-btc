@@ -16,6 +16,7 @@ import os
 import time
 import math
 import random
+import statistics
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, field
 from typing import Optional
@@ -58,6 +59,10 @@ class Config:
     GAMMA_API: str = "https://gamma-api.polymarket.com"
     CLOB_API: str  = "https://clob.polymarket.com"
     BINANCE_API: str = "https://api.binance.com"
+    COINBASE_API: str = "https://api.exchange.coinbase.com"
+    KRAKEN_API: str = "https://api.kraken.com"
+    BINANCE_WS: str = "wss://stream.binance.com:9443/ws/btcusdt@ticker"
+    BTC_REFERENCE_REFRESH_SEC: int = field(default_factory=lambda: env_int("POLY_BTC_REFERENCE_REFRESH_SEC", 120))
 
     # Trading parameters
     SPREAD_PCT: float = 0.04       # Quote ±2% around fair price (captures 4% spread)
@@ -73,6 +78,7 @@ class Config:
     ENABLE_LIVE_TRADING: bool = field(default_factory=lambda: env_bool("POLY_ENABLE_LIVE_TRADING", False))
     MIN_ORDER_SHARES: float = field(default_factory=lambda: env_float("POLY_MIN_ORDER_SHARES", 5.0))
     MAX_ORDERS_PER_CYCLE: int = field(default_factory=lambda: env_int("POLY_MAX_ORDERS_PER_CYCLE", 20))
+    CANCEL_BEFORE_REQUOTE: bool = field(default_factory=lambda: env_bool("POLY_CANCEL_BEFORE_REQUOTE", True))
 
     # Risk
     MAX_DAILY_LOSS: float = 200.0  # Kill switch: stop if daily PnL < -$200
@@ -210,10 +216,20 @@ def init_db(database_url: str):
             kill_switch     INTEGER DEFAULT 0,
             paper_mode      INTEGER DEFAULT 1,
             btc_price       REAL DEFAULT 0,
+            btc_source      TEXT DEFAULT 'ref',
+            ws_connected    INTEGER DEFAULT 0,
+            ws_tick_age_sec REAL DEFAULT 0,
+            cycle_latency_ms REAL DEFAULT 0,
+            orders_placed_cycle INTEGER DEFAULT 0,
             last_cycle      TEXT DEFAULT '',
             errors          INTEGER DEFAULT 0
         )
     """)
+    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS btc_source TEXT DEFAULT 'ref'")
+    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS ws_connected INTEGER DEFAULT 0")
+    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS ws_tick_age_sec REAL DEFAULT 0")
+    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS cycle_latency_ms REAL DEFAULT 0")
+    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS orders_placed_cycle INTEGER DEFAULT 0")
     con.commit()
     return con
 
@@ -262,8 +278,55 @@ class BotState:
     starting_balance: float = config.PAPER_INITIAL_BALANCE
     current_balance: float = config.PAPER_INITIAL_BALANCE
     equity: float = config.PAPER_INITIAL_BALANCE
+    ws_btc_price: float = 0.0
+    ws_connected: bool = False
+    ws_last_tick: float = 0.0
+    reference_btc_price: float = 0.0
+    reference_last_update: float = 0.0
+    cycle_latency_ms: float = 0.0
+    orders_placed_cycle: int = 0
 
 state = BotState()
+
+class BinanceBtcWsFeed:
+    """Maintains a real-time BTC ticker stream from Binance websocket."""
+    def __init__(self):
+        self._running = True
+
+    async def run(self):
+        backoff_sec = 1
+        while self._running and state.running:
+            try:
+                timeout = aiohttp.ClientTimeout(total=None, sock_read=60)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.ws_connect(config.BINANCE_WS, heartbeat=20) as ws:
+                        state.ws_connected = True
+                        log.info("BTC websocket connected (Binance)")
+                        backoff_sec = 1
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                try:
+                                    payload = json.loads(msg.data)
+                                    tick = float(payload.get("c", 0.0))
+                                    if tick > 0:
+                                        state.ws_btc_price = tick
+                                        state.ws_last_tick = time.time()
+                                except Exception:
+                                    continue
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.warning(f"BTC websocket disconnected: {e}")
+            finally:
+                state.ws_connected = False
+                if self._running and state.running:
+                    await asyncio.sleep(backoff_sec)
+                    backoff_sec = min(backoff_sec * 2, 20)
+
+    def stop(self):
+        self._running = False
 
 def get_total_exposure() -> float:
     """Approximate gross inventory notional in USDC."""
@@ -273,6 +336,15 @@ def get_total_exposure() -> float:
         avg = max(0.01, float(pos.get("avg_price", 0.0)))
         exposure += qty * avg
     return round(exposure, 4)
+
+def get_market_exposure(market_id: str) -> float:
+    """Approximate per-market inventory notional in USDC."""
+    pos = state.open_positions.get(market_id)
+    if not pos:
+        return 0.0
+    qty = abs(float(pos.get("qty", 0.0)))
+    avg = max(0.01, float(pos.get("avg_price", 0.0)))
+    return round(qty * avg, 4)
 
 def refresh_account_state():
     """Refresh balance/equity fields for paper-mode accounting."""
@@ -284,29 +356,91 @@ def refresh_account_state():
 # ─── Market Data ──────────────────────────────────────────────────────────────
 
 async def get_btc_price(session: aiohttp.ClientSession) -> float:
-    """Fetch spot BTC/USDT from Binance."""
-    try:
-        async with session.get(
-            f"{config.BINANCE_API}/api/v3/ticker/price",
-            params={"symbol": "BTCUSDT"},
-            timeout=aiohttp.ClientTimeout(total=5)
-        ) as r:
-            d = await r.json()
-            price = float(d["price"])
-            state.btc_price = price
-            db.execute(
-                """
-                INSERT INTO btc_prices (ts, price)
-                VALUES (%s, %s)
-                ON CONFLICT (ts) DO UPDATE SET price = EXCLUDED.price
-                """,
-                (datetime.now(timezone.utc), price),
-            )
-            db.commit()
-            return price
-    except Exception as e:
-        log.warning(f"BTC price fetch failed: {e}")
-        return state.btc_price or 85000.0
+    """Use websocket BTC feed when fresh, with periodic multi-exchange reference refresh."""
+    async def fetch_binance() -> Optional[float]:
+        try:
+            async with session.get(
+                f"{config.BINANCE_API}/api/v3/ticker/price",
+                params={"symbol": "BTCUSDT"},
+                timeout=aiohttp.ClientTimeout(total=4)
+            ) as r:
+                d = await r.json()
+                return float(d["price"])
+        except Exception:
+            return None
+
+    async def fetch_coinbase() -> Optional[float]:
+        try:
+            async with session.get(
+                f"{config.COINBASE_API}/products/BTC-USD/ticker",
+                timeout=aiohttp.ClientTimeout(total=4)
+            ) as r:
+                d = await r.json()
+                return float(d["price"])
+        except Exception:
+            return None
+
+    async def fetch_kraken() -> Optional[float]:
+        try:
+            async with session.get(
+                f"{config.KRAKEN_API}/0/public/Ticker",
+                params={"pair": "XBTUSD"},
+                timeout=aiohttp.ClientTimeout(total=4)
+            ) as r:
+                d = await r.json()
+                result = d.get("result", {})
+                pair_key = next(iter(result.keys()), None)
+                if not pair_key:
+                    return None
+                last_trade = result[pair_key].get("c", [])
+                if not last_trade:
+                    return None
+                return float(last_trade[0])
+        except Exception:
+            return None
+
+    now_ts = time.time()
+    ws_fresh = state.ws_btc_price > 0 and (now_ts - state.ws_last_tick) <= 15
+    refresh_due = (now_ts - state.reference_last_update) >= config.BTC_REFERENCE_REFRESH_SEC
+
+    if refresh_due or state.reference_btc_price <= 0:
+        prices = {}
+        binance, coinbase, kraken = await asyncio.gather(
+            fetch_binance(),
+            fetch_coinbase(),
+            fetch_kraken(),
+        )
+        if binance is not None:
+            prices["binance"] = binance
+        if coinbase is not None:
+            prices["coinbase"] = coinbase
+        if kraken is not None:
+            prices["kraken"] = kraken
+        if prices:
+            state.reference_btc_price = float(statistics.median(prices.values()))
+            state.reference_last_update = now_ts
+            sources = ",".join(sorted(prices.keys()))
+            log.info(f"BTC reference median from {sources}: ${state.reference_btc_price:,.2f}")
+
+    if ws_fresh:
+        price = state.ws_btc_price
+    elif state.reference_btc_price > 0:
+        price = state.reference_btc_price
+    else:
+        log.warning("BTC price unavailable from websocket/reference; using last known price")
+        price = state.btc_price or 85000.0
+
+    state.btc_price = price
+    db.execute(
+        """
+        INSERT INTO btc_prices (ts, price)
+        VALUES (%s, %s)
+        ON CONFLICT (ts) DO UPDATE SET price = EXCLUDED.price
+        """,
+        (datetime.now(timezone.utc), price),
+    )
+    db.commit()
+    return price
 
 async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
     """
@@ -734,6 +868,49 @@ async def place_order(
 
 # ─── Risk / Kill Switch ────────────────────────────────────────────────────────
 
+def cancel_live_orders_best_effort() -> int:
+    """
+    Try to cancel stale live orders before re-quoting.
+    Uses whichever client methods are available in installed py-clob-client version.
+    """
+    if not is_live_mode():
+        return 0
+    try:
+        client = get_live_client()
+
+        for method_name in ("cancel_all", "cancel_all_orders"):
+            method = getattr(client, method_name, None)
+            if callable(method):
+                resp = method()
+                if isinstance(resp, dict):
+                    count = int(resp.get("cancelled") or resp.get("count") or 0)
+                elif isinstance(resp, list):
+                    count = len(resp)
+                else:
+                    count = 0
+                return count
+
+        get_orders = getattr(client, "get_orders", None)
+        cancel = getattr(client, "cancel", None)
+        if callable(get_orders) and callable(cancel):
+            orders = get_orders() or []
+            cancelled = 0
+            for order in orders:
+                oid = None
+                if isinstance(order, dict):
+                    oid = order.get("orderID") or order.get("id")
+                if not oid:
+                    continue
+                try:
+                    cancel(oid)
+                    cancelled += 1
+                except Exception:
+                    continue
+            return cancelled
+    except Exception as e:
+        log.warning(f"Unable to cancel stale live orders before re-quote: {e}")
+    return 0
+
 def check_kill_switch():
     """Halt trading if daily loss exceeds threshold."""
     if state.daily_pnl < -config.MAX_DAILY_LOSS:
@@ -786,17 +963,21 @@ async def main_loop():
         f"starting_balance=${state.starting_balance:.2f}"
     )
 
+    ws_feed = BinanceBtcWsFeed()
+    ws_task = asyncio.create_task(ws_feed.run())
     async with aiohttp.ClientSession() as session:
         cycle = 0
         while state.running:
             try:
+                cycle_started = time.perf_counter()
                 cycle += 1
                 state.last_cycle = datetime.now().strftime("%H:%M:%S")
                 log.info(f"─── Cycle {cycle} ───────────────────────────────────────")
 
                 # 1. Refresh BTC price
                 btc = await get_btc_price(session)
-                log.info(f"BTC/USDT: ${btc:,.2f}")
+                btc_src = "ws" if (time.time() - state.ws_last_tick) <= 15 and state.ws_btc_price > 0 else "ref"
+                log.info(f"BTC/USDT: ${btc:,.2f} ({btc_src})")
 
                 # 2. Fetch active BTC markets
                 markets = await get_btc_markets(session)
@@ -804,11 +985,15 @@ async def main_loop():
 
                 # 3. Check kill switch
                 check_kill_switch()
+                placed_count = 0
                 if state.kill_switch:
                     log.warning("Kill switch active — skipping order placement")
                 else:
+                    if is_live_mode() and config.CANCEL_BEFORE_REQUOTE:
+                        cancelled = cancel_live_orders_best_effort()
+                        if cancelled:
+                            log.info(f"Cancelled {cancelled} stale live orders before re-quote")
                     # 4. Quote each market
-                    placed_count = 0
                     for market in markets:
                         quote = await compute_quote(session, market)
                         if quote is None:
@@ -825,13 +1010,21 @@ async def main_loop():
                         if quote.should_place:
                             if state.paper_mode:
                                 exposure = get_total_exposure()
-                                projected = exposure + config.ORDER_SIZE
+                                projected = exposure + (2.0 * config.ORDER_SIZE)
                                 if projected > state.equity:
                                     log.warning(
                                         f"Paper balance guard: projected exposure ${projected:.2f} > equity ${state.equity:.2f}. "
                                         "Skipping new quote."
                                     )
                                     continue
+                            market_exposure = get_market_exposure(market.condition_id)
+                            projected_market = market_exposure + config.ORDER_SIZE
+                            if projected_market > config.MAX_POSITION:
+                                log.info(
+                                    f"Max position guard for market {market.condition_id[:12]}: "
+                                    f"${projected_market:.2f} > ${config.MAX_POSITION:.2f}, skipping quote"
+                                )
+                                continue
                             if placed_count >= config.MAX_ORDERS_PER_CYCLE:
                                 log.info(
                                     f"Max orders per cycle reached ({config.MAX_ORDERS_PER_CYCLE}), stopping quote placement"
@@ -868,6 +1061,12 @@ async def main_loop():
                             f"equity=${state.equity:.2f} realized={state.realized_pnl:+.2f} exposure=${get_total_exposure():.2f}"
                         )
 
+                state.orders_placed_cycle = placed_count
+                state.cycle_latency_ms = round((time.perf_counter() - cycle_started) * 1000.0, 2)
+                log.info(
+                    f"Cycle telemetry: orders={state.orders_placed_cycle} latency_ms={state.cycle_latency_ms:.2f}"
+                )
+
                 # 5. Update stats
                 update_stats()
                 update_runtime_state()
@@ -883,6 +1082,12 @@ async def main_loop():
                 state.errors.append(f"{datetime.now().isoformat()} | Cycle error: {e}")
                 await asyncio.sleep(10)
 
+    ws_feed.stop()
+    ws_task.cancel()
+    try:
+        await ws_task
+    except Exception:
+        pass
     log.info("Bot stopped.")
 
 def compute_daily_pnl() -> float:
@@ -892,16 +1097,24 @@ def compute_daily_pnl() -> float:
     return float(row[0] or 0.0)
 
 def update_runtime_state():
+    now_ts = time.time()
+    ws_age = (now_ts - state.ws_last_tick) if state.ws_last_tick > 0 else 9999.0
+    btc_source = "ws" if (state.ws_connected and ws_age <= 15 and state.ws_btc_price > 0) else "ref"
     db.execute(
         """INSERT INTO runtime_state
-           (id,updated_at,running,kill_switch,paper_mode,btc_price,last_cycle,errors)
-           VALUES (1,%s,%s,%s,%s,%s,%s,%s)
+           (id,updated_at,running,kill_switch,paper_mode,btc_price,btc_source,ws_connected,ws_tick_age_sec,cycle_latency_ms,orders_placed_cycle,last_cycle,errors)
+           VALUES (1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
            ON CONFLICT (id) DO UPDATE
            SET updated_at = EXCLUDED.updated_at,
                running = EXCLUDED.running,
                kill_switch = EXCLUDED.kill_switch,
                paper_mode = EXCLUDED.paper_mode,
                btc_price = EXCLUDED.btc_price,
+               btc_source = EXCLUDED.btc_source,
+               ws_connected = EXCLUDED.ws_connected,
+               ws_tick_age_sec = EXCLUDED.ws_tick_age_sec,
+               cycle_latency_ms = EXCLUDED.cycle_latency_ms,
+               orders_placed_cycle = EXCLUDED.orders_placed_cycle,
                last_cycle = EXCLUDED.last_cycle,
                errors = EXCLUDED.errors""",
         (
@@ -910,6 +1123,11 @@ def update_runtime_state():
             int(state.kill_switch),
             int(state.paper_mode),
             state.btc_price,
+            btc_source,
+            int(state.ws_connected),
+            float(round(ws_age, 3)),
+            float(state.cycle_latency_ms),
+            int(state.orders_placed_cycle),
             state.last_cycle,
             len(state.errors),
         ),

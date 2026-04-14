@@ -66,9 +66,19 @@ def ensure_db():
         kill_switch INTEGER DEFAULT 0,
         paper_mode INTEGER DEFAULT 1,
         btc_price REAL DEFAULT 0,
+        btc_source TEXT DEFAULT 'ref',
+        ws_connected INTEGER DEFAULT 0,
+        ws_tick_age_sec REAL DEFAULT 0,
+        cycle_latency_ms REAL DEFAULT 0,
+        orders_placed_cycle INTEGER DEFAULT 0,
         last_cycle TEXT DEFAULT '',
         errors INTEGER DEFAULT 0
     )""")
+    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS btc_source TEXT DEFAULT 'ref'")
+    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS ws_connected INTEGER DEFAULT 0")
+    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS ws_tick_age_sec REAL DEFAULT 0")
+    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS cycle_latency_ms REAL DEFAULT 0")
+    con.execute("ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS orders_placed_cycle INTEGER DEFAULT 0")
 
     # Seed demo data only when explicitly requested.
     count = con.execute("SELECT COUNT(*) AS cnt FROM trades").fetchone()["cnt"]
@@ -226,7 +236,7 @@ def summary():
 def status():
     con = get_db()
     row = con.execute(
-        "SELECT updated_at, running, kill_switch, paper_mode, btc_price, last_cycle, errors FROM runtime_state WHERE id=1"
+        "SELECT updated_at, running, kill_switch, paper_mode, btc_price, btc_source, ws_connected, ws_tick_age_sec, cycle_latency_ms, orders_placed_cycle, last_cycle, errors FROM runtime_state WHERE id=1"
     ).fetchone()
     if not row:
         return jsonify({
@@ -235,6 +245,11 @@ def status():
             "kill_switch": False,
             "paper_mode": True,
             "btc_price": 0.0,
+            "btc_source": "ref",
+            "ws_connected": False,
+            "ws_tick_age_sec": None,
+            "cycle_latency_ms": 0.0,
+            "orders_placed_cycle": 0,
             "last_cycle": "",
             "errors": 0,
             "updated_at": None,
@@ -255,6 +270,11 @@ def status():
         "kill_switch": bool(row["kill_switch"]),
         "paper_mode": bool(row["paper_mode"]),
         "btc_price": float(row["btc_price"] or 0),
+        "btc_source": str(row["btc_source"] or "ref"),
+        "ws_connected": bool(row["ws_connected"]),
+        "ws_tick_age_sec": (None if row["ws_tick_age_sec"] is None else float(row["ws_tick_age_sec"])),
+        "cycle_latency_ms": float(row["cycle_latency_ms"] or 0.0),
+        "orders_placed_cycle": int(row["orders_placed_cycle"] or 0),
         "last_cycle": row["last_cycle"] or "",
         "errors": int(row["errors"] or 0),
         "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else updated_at,

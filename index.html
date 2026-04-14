@@ -95,6 +95,28 @@
     font-size: 12px; font-family: var(--mono);
     color: var(--green);
   }
+  .ws-pill {
+    display: flex; align-items: center; gap: 7px;
+    background: rgba(77,159,255,0.08);
+    border: 1px solid rgba(77,159,255,0.25);
+    border-radius: 20px;
+    padding: 5px 12px;
+    font-size: 12px; font-family: var(--mono);
+    color: var(--blue);
+  }
+  .ws-pill .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--blue);
+  }
+  .ops-pill {
+    display: flex; align-items: center; gap: 7px;
+    background: rgba(167,139,250,0.08);
+    border: 1px solid rgba(167,139,250,0.25);
+    border-radius: 20px;
+    padding: 5px 12px;
+    font-size: 12px; font-family: var(--mono);
+    color: var(--purple);
+  }
   .status-pill .dot {
     width: 7px; height: 7px; border-radius: 50%;
     background: var(--green);
@@ -337,6 +359,13 @@
     <div class="status-pill" id="status-pill">
       <div class="dot"></div>
       <span id="status-text">LIVE</span>
+    </div>
+    <div class="ws-pill" id="ws-pill">
+      <div class="dot"></div>
+      <span id="ws-text">WS —</span>
+    </div>
+    <div class="ops-pill" id="ops-pill">
+      <span id="ops-text">ORD — | LAT —</span>
     </div>
     <div style="font-family:var(--mono);font-size:11px;color:var(--text3)" id="last-update">—</div>
   </div>
@@ -649,8 +678,12 @@ async function loadStatus() {
   const d = await fetchJSON('/api/status');
   const statusText = document.getElementById('status-text');
   const statusPill = document.getElementById('status-pill');
+  const wsPill = document.getElementById('ws-pill');
+  const wsText = document.getElementById('ws-text');
+  const opsText = document.getElementById('ops-text');
   const modeLabel = document.getElementById('mode-label');
   const dot = statusPill.querySelector('.dot');
+  const wsDot = wsPill.querySelector('.dot');
 
   modeLabel.textContent = d.paper_mode ? 'PAPER TRADING' : 'LIVE TRADING';
   modeLabel.style.color = d.paper_mode ? 'var(--yellow)' : 'var(--green)';
@@ -674,6 +707,27 @@ async function loadStatus() {
     statusPill.style.color = 'var(--green)';
     dot.style.background = 'var(--green)';
   }
+
+  const wsConnected = Boolean(d.ws_connected);
+  const wsAge = (d.ws_tick_age_sec == null) ? null : Number(d.ws_tick_age_sec);
+  const source = (d.btc_source || 'ref').toUpperCase();
+  if (wsConnected && wsAge !== null && wsAge <= 15) {
+    wsText.textContent = `WS ${source} ${wsAge.toFixed(1)}s`;
+    wsPill.style.borderColor = 'rgba(77,159,255,0.25)';
+    wsPill.style.background = 'rgba(77,159,255,0.08)';
+    wsPill.style.color = 'var(--blue)';
+    wsDot.style.background = 'var(--blue)';
+  } else {
+    wsText.textContent = `WS OFF ${source}`;
+    wsPill.style.borderColor = 'rgba(247,195,85,0.25)';
+    wsPill.style.background = 'rgba(247,195,85,0.08)';
+    wsPill.style.color = 'var(--yellow)';
+    wsDot.style.background = 'var(--yellow)';
+  }
+
+  const ordersPlaced = Number(d.orders_placed_cycle || 0);
+  const latencyMs = Number(d.cycle_latency_ms || 0);
+  opsText.textContent = `ORD ${ordersPlaced} | LAT ${latencyMs.toFixed(0)}ms`;
 }
 
 async function loadSummary() {

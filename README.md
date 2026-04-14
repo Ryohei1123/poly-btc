@@ -3,7 +3,8 @@
 ## Overview
 
 Replicates the strategy of the `0x6E1d...D0F` account:
-- Reads BTC price from Binance in real-time
+- Reads BTC price from multiple exchanges (Binance/Coinbase/Kraken) and uses a median reference
+- Uses Binance websocket for low-latency BTC updates with periodic reference re-anchoring
 - Calculates **fair probability** using log-normal pricing (80% vol)
 - Compares vs Polymarket CLOB midpoint
 - Places two-sided quotes (bid + ask) when edge ≥ 1.5%
@@ -65,7 +66,7 @@ pip install py-clob-client
 
 ```
 Every 30 seconds:
-  1. GET /api/v3/ticker/price?symbol=BTCUSDT  → BTC spot
+  1. GET BTC spot from Binance + Coinbase + Kraken  → median BTC reference
   2. GET gamma-api.polymarket.com/markets?tag=crypto → active BTC markets
   3. For each market:
        strike = parse "$X" from question
@@ -74,6 +75,7 @@ Every 30 seconds:
        mid    = CLOB midpoint for YES token
        edge   = abs(fair - mid)
        if edge >= 1.5%:
+         if market exposure + order_size <= max_position:
          POST bid @ fair - 2%
          POST ask @ fair + 2%
 ```
@@ -120,6 +122,8 @@ Runtime env vars:
 - `POLY_PAPER_INITIAL_BALANCE=500` sets paper account starting balance
 - `POLY_MIN_ORDER_SHARES` minimum share size guard
 - `POLY_MAX_ORDERS_PER_CYCLE` per-cycle order throttle
+- `POLY_CANCEL_BEFORE_REQUOTE=1` cancel stale live orders before each quote cycle
+- `POLY_BTC_REFERENCE_REFRESH_SEC=120` reference median refresh cadence in seconds
 
 ## Run 24/7 (Linux)
 
@@ -165,3 +169,4 @@ Open `http://localhost:5050` after running `server.py`:
 - **Win rate ring** — live win/loss ratio
 - **Live log** — tailed bot log output
 - **Quote monitor** — last 30 quotes with edge stats
+- **Header telemetry** — bot status, websocket health, per-cycle orders, and cycle latency
