@@ -446,6 +446,27 @@
     </div>
   </div>
 
+  <!-- Execution Quality -->
+  <div class="panel" style="margin-bottom:14px;">
+    <div class="panel-header">
+      <span class="panel-title">Execution Quality</span>
+      <span class="panel-badge" id="exec-score">SCORE —</span>
+      <span class="panel-badge" id="exec-updated">—</span>
+    </div>
+    <div class="panel-body" style="padding:10px 14px;">
+      <div class="quote-row" style="font-size:11px;font-family:var(--mono);grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;padding:4px 0;border:none;">
+        <span id="exec-hit">Q-HIT —</span>
+        <span id="exec-ack">ACK —</span>
+        <span id="exec-fill">FILL —</span>
+        <span id="exec-edge">EDGE —</span>
+        <span id="exec-dist">DIST —</span>
+      </div>
+      <div style="font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:6px;">
+        <span id="exec-counts">considered=0 eligible=0 attempts=0 acks=0 fills=0</span>
+      </div>
+    </div>
+  </div>
+
   <!-- Stats -->
   <div class="stats-grid">
     <div class="stat-card" style="--accent:var(--green)">
@@ -935,6 +956,67 @@ async function loadLogs() {
   }
 }
 
+async function loadExecutionTelemetry() {
+  try {
+    const d = await fetchJSON('/api/execution_telemetry');
+    const pct = (v) => (Number(v || 0) * 100).toFixed(2) + '%';
+    const num = (v, n = 4) => Number(v || 0).toFixed(n);
+    const thresholds = d.thresholds || {};
+    const scoreWeights = d.score_weights || {};
+    const scoreThresholds = d.score_thresholds || {};
+    const rateTone = (v, good, warn) => {
+      const x = Number(v || 0);
+      if (x >= good) return 'var(--green)';
+      if (x >= warn) return 'var(--yellow)';
+      return 'var(--red)';
+    };
+    const qHit = Number(d.quote_hit_rate_cycle || 0);
+    const ack = Number(d.ack_rate_cycle || 0);
+    const fill = Number(d.fill_rate_cycle || 0);
+    const wQhit = Number(scoreWeights.qhit ?? 0.35);
+    const wAck = Number(scoreWeights.ack ?? 0.40);
+    const wFill = Number(scoreWeights.fill ?? 0.25);
+    const weightDenom = (wQhit + wAck + wFill) || 1.0;
+    const qualityScore = ((qHit * wQhit) + (ack * wAck) + (fill * wFill)) / weightDenom * 100.0;
+
+    el('exec-hit').textContent = `Q-HIT ${pct(d.quote_hit_rate_cycle)} | AVG ${pct(d.quote_hit_rate_avg)}`;
+    el('exec-ack').textContent = `ACK ${pct(d.ack_rate_cycle)} | AVG ${pct(d.ack_rate_avg)}`;
+    el('exec-fill').textContent = `FILL ${pct(d.fill_rate_cycle)} | AVG ${pct(d.fill_rate_avg)}`;
+    el('exec-edge').textContent = `EDGE ${num(d.avg_edge_cycle)} | AVG ${num(d.avg_edge_avg)}`;
+    el('exec-dist').textContent = `DIST ${num(d.avg_order_distance_cycle)} | AVG ${num(d.avg_order_distance_avg)}`;
+    el('exec-hit').style.color = rateTone(qHit, Number(thresholds.qhit_good ?? 0.45), Number(thresholds.qhit_warn ?? 0.20));
+    el('exec-ack').style.color = rateTone(ack, Number(thresholds.ack_good ?? 0.75), Number(thresholds.ack_warn ?? 0.50));
+    el('exec-fill').style.color = rateTone(fill, Number(thresholds.fill_good ?? 0.30), Number(thresholds.fill_warn ?? 0.12));
+    el('exec-edge').style.color = 'var(--yellow)';
+    el('exec-dist').style.color = 'var(--blue)';
+
+    el('exec-counts').textContent =
+      `considered=${Number(d.quotes_considered_cycle || 0)} ` +
+      `eligible=${Number(d.quotes_eligible_cycle || 0)} ` +
+      `attempts=${Number(d.order_attempts_cycle || 0)} ` +
+      `acks=${Number(d.order_acks_cycle || 0)} ` +
+      `fills=${Number(d.fills_cycle || 0)}`;
+    el('exec-score').textContent = `SCORE ${qualityScore.toFixed(1)}`;
+    const scoreGood = Number(scoreThresholds.good ?? 55.0);
+    const scoreWarn = Number(scoreThresholds.warn ?? 35.0);
+    el('exec-score').style.color =
+      qualityScore >= scoreGood ? 'var(--green)' : (qualityScore >= scoreWarn ? 'var(--yellow)' : 'var(--red)');
+
+    const ts = d.updated_at ? new Date(d.updated_at) : null;
+    el('exec-updated').textContent = ts && !Number.isNaN(ts.valueOf()) ? ts.toLocaleTimeString() : 'n/a';
+  } catch (_e) {
+    el('exec-hit').textContent = 'Q-HIT —';
+    el('exec-ack').textContent = 'ACK —';
+    el('exec-fill').textContent = 'FILL —';
+    el('exec-edge').textContent = 'EDGE —';
+    el('exec-dist').textContent = 'DIST —';
+    el('exec-counts').textContent = 'considered=0 eligible=0 attempts=0 acks=0 fills=0';
+    el('exec-score').textContent = 'SCORE —';
+    el('exec-score').style.color = 'var(--text2)';
+    el('exec-updated').textContent = 'n/a';
+  }
+}
+
 // ─── Refresh all ─────────────────────────────────────────────────────────────
 async function refreshAll() {
   el('last-update').textContent = 'Refreshing…';
@@ -948,6 +1030,7 @@ async function refreshAll() {
     loadHourly(),
     loadQuotes(),
     loadLogs(),
+    loadExecutionTelemetry(),
   ]);
   el('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
 }

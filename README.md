@@ -127,6 +127,29 @@ Runtime env vars:
 - `POLY_FORCE_PAPER=1` forces paper mode even if live mode is configured
 - `POLY_ENABLE_LIVE_TRADING=1` is required for real orders in live mode
 - `POLY_PAPER_INITIAL_BALANCE=500` sets paper account starting balance
+- `POLY_STRATEGY_PROFILE=conservative|balanced|target_clone|aggressive` applies preset defaults for major strategy/risk knobs (explicit per-key env vars always override)
+  - `target_clone` is tuned for broad BTC market-maker coverage (faster cycle, wider market set, moderate spread/edge)
+- `POLY_SPREAD_PCT` quote spread width (e.g. `0.04` = 4%)
+- `POLY_MIN_EDGE` minimum fair-vs-mid edge to quote
+- `POLY_ORDER_SIZE` USDC notional per side
+- `POLY_MAX_POSITION` max USDC exposure per market
+- `POLY_QUOTE_REFRESH_SEC` quote cycle cadence
+- `POLY_MARKETS_WATCHED` breadth of BTC markets scanned each cycle
+- `POLY_MARKETS_FETCH_LIMIT` raw Gamma fetch size before model filtering
+- `POLY_MIN_MARKET_LIQUIDITY` minimum market liquidity required to place quotes
+- `POLY_MAX_DAILY_LOSS` kill-switch threshold
+- `POLY_MAX_OPEN_ORDERS` safety cap on outstanding orders
+- `POLY_INVENTORY_SOFT_LIMIT_PCT` one-sided quoting threshold (inventory rebalance)
+- `POLY_INVENTORY_HARD_LIMIT_PCT` hard block threshold for risk-increasing side
+- `POLY_INVENTORY_SKEW_PCT` quote skew magnitude used to mean-revert inventory
+- `POLY_PASSIVE_BUFFER_TICKS` top-of-book passive buffer (post-only style distance)
+- `POLY_MIN_MID_DISTANCE_PCT` minimum distance from midpoint to avoid taker-like quotes
+- `POLY_MAX_MID_DISTANCE_PCT` maximum distance from midpoint to avoid too-far stale quotes
+- `POLY_EXEC_QHIT_GOOD` / `POLY_EXEC_QHIT_WARN` execution panel thresholds for quote-hit rate
+- `POLY_EXEC_ACK_GOOD` / `POLY_EXEC_ACK_WARN` execution panel thresholds for ack rate
+- `POLY_EXEC_FILL_GOOD` / `POLY_EXEC_FILL_WARN` execution panel thresholds for fill rate
+- `POLY_EXEC_SCORE_W_QHIT`, `POLY_EXEC_SCORE_W_ACK`, `POLY_EXEC_SCORE_W_FILL` score weighting
+- `POLY_EXEC_SCORE_GOOD` / `POLY_EXEC_SCORE_WARN` score color bands in dashboard
 - `POLY_MIN_ORDER_SHARES` minimum share size guard
 - `POLY_MAX_ORDERS_PER_CYCLE` per-cycle order throttle
 - `POLY_CANCEL_BEFORE_REQUOTE=1` cancel stale live orders before each quote cycle
@@ -180,3 +203,4 @@ Open `http://localhost:5050` after running `server.py`:
 - **Quote monitor** — last 30 quotes with edge stats
 - **Quote model visibility** — quote stream shows model type (`terminal`, `barrier`, `comparative_5050`)
 - **Header telemetry** — bot status, websocket health, per-cycle and 10-cycle average orders/latency with simple trend markers (`+` improving/increasing, `-` worsening/decreasing, `=` unchanged) and inline legend (hover, click/tap, keyboard accessible, viewport-aware tooltip placement)
+- **Execution telemetry API** — `/api/execution_telemetry` exposes quote hit/ack/fill rates, edge quality, and quote distance (cycle + rolling averages)

@@ -20,6 +20,15 @@ from db_schema import apply_schema
 
 load_dotenv()
 
+def env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/polybot")
 DEFAULT_STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR = str(DEFAULT_STATIC_DIR if DEFAULT_STATIC_DIR.exists() else Path(__file__).parent)
@@ -31,6 +40,23 @@ BINANCE_API = "https://api.binance.com"
 LIVE_CACHE: dict[str, dict[str, object]] = {
     "markets": {"ts": 0.0, "data": []},
     "btc_history": {"ts": 0.0, "data": []},
+}
+EXEC_THRESHOLDS = {
+    "qhit_good": env_float("POLY_EXEC_QHIT_GOOD", 0.45),
+    "qhit_warn": env_float("POLY_EXEC_QHIT_WARN", 0.20),
+    "ack_good": env_float("POLY_EXEC_ACK_GOOD", 0.75),
+    "ack_warn": env_float("POLY_EXEC_ACK_WARN", 0.50),
+    "fill_good": env_float("POLY_EXEC_FILL_GOOD", 0.30),
+    "fill_warn": env_float("POLY_EXEC_FILL_WARN", 0.12),
+}
+EXEC_SCORE_WEIGHTS = {
+    "qhit": env_float("POLY_EXEC_SCORE_W_QHIT", 0.35),
+    "ack": env_float("POLY_EXEC_SCORE_W_ACK", 0.40),
+    "fill": env_float("POLY_EXEC_SCORE_W_FILL", 0.25),
+}
+EXEC_SCORE_THRESHOLDS = {
+    "good": env_float("POLY_EXEC_SCORE_GOOD", 55.0),
+    "warn": env_float("POLY_EXEC_SCORE_WARN", 35.0),
 }
 
 SQL_COUNT_TRADES = "SELECT COUNT(*) AS cnt FROM trades"
@@ -78,6 +104,27 @@ SQL_HOURLY_PNL = """SELECT to_char(date_trunc('hour', ts), 'YYYY-MM-DD HH24:00')
                   COUNT(*) as trades, COALESCE(SUM(pnl), 0) as pnl
            FROM trades WHERE status='filled'
            GROUP BY hour ORDER BY hour DESC LIMIT 48"""
+SQL_EXEC_TELEMETRY = """
+SELECT
+    quotes_considered_cycle,
+    quotes_eligible_cycle,
+    order_attempts_cycle,
+    order_acks_cycle,
+    fills_cycle,
+    quote_hit_rate_cycle,
+    ack_rate_cycle,
+    fill_rate_cycle,
+    avg_edge_cycle,
+    avg_order_distance_cycle,
+    quote_hit_rate_avg,
+    ack_rate_avg,
+    fill_rate_avg,
+    avg_edge_avg,
+    avg_order_distance_avg,
+    updated_at
+FROM runtime_state
+WHERE id=1
+"""
 
 def get_db():
     if "db" not in g:
@@ -413,6 +460,57 @@ def status():
         "market_count": len(markets),
         "market_age_sec": round(market_age, 1),
         "btc_age_sec": round(btc_age, 1),
+    })
+
+@app.route("/api/execution_telemetry")
+def execution_telemetry():
+    con = get_db()
+    row = con.execute(SQL_EXEC_TELEMETRY).fetchone()
+    if not row:
+        return jsonify({
+            "quotes_considered_cycle": 0,
+            "quotes_eligible_cycle": 0,
+            "order_attempts_cycle": 0,
+            "order_acks_cycle": 0,
+            "fills_cycle": 0,
+            "quote_hit_rate_cycle": 0.0,
+            "ack_rate_cycle": 0.0,
+            "fill_rate_cycle": 0.0,
+            "avg_edge_cycle": 0.0,
+            "avg_order_distance_cycle": 0.0,
+            "quote_hit_rate_avg": 0.0,
+            "ack_rate_avg": 0.0,
+            "fill_rate_avg": 0.0,
+            "avg_edge_avg": 0.0,
+            "avg_order_distance_avg": 0.0,
+            "updated_at": None,
+            "thresholds": EXEC_THRESHOLDS,
+            "score_weights": EXEC_SCORE_WEIGHTS,
+            "score_thresholds": EXEC_SCORE_THRESHOLDS,
+        })
+    return jsonify({
+        "quotes_considered_cycle": int(row["quotes_considered_cycle"] or 0),
+        "quotes_eligible_cycle": int(row["quotes_eligible_cycle"] or 0),
+        "order_attempts_cycle": int(row["order_attempts_cycle"] or 0),
+        "order_acks_cycle": int(row["order_acks_cycle"] or 0),
+        "fills_cycle": int(row["fills_cycle"] or 0),
+        "quote_hit_rate_cycle": float(row["quote_hit_rate_cycle"] or 0.0),
+        "ack_rate_cycle": float(row["ack_rate_cycle"] or 0.0),
+        "fill_rate_cycle": float(row["fill_rate_cycle"] or 0.0),
+        "avg_edge_cycle": float(row["avg_edge_cycle"] or 0.0),
+        "avg_order_distance_cycle": float(row["avg_order_distance_cycle"] or 0.0),
+        "quote_hit_rate_avg": float(row["quote_hit_rate_avg"] or 0.0),
+        "ack_rate_avg": float(row["ack_rate_avg"] or 0.0),
+        "fill_rate_avg": float(row["fill_rate_avg"] or 0.0),
+        "avg_edge_avg": float(row["avg_edge_avg"] or 0.0),
+        "avg_order_distance_avg": float(row["avg_order_distance_avg"] or 0.0),
+        "updated_at": (
+            row["updated_at"].isoformat()
+            if isinstance(row["updated_at"], datetime) else row["updated_at"]
+        ),
+        "thresholds": EXEC_THRESHOLDS,
+        "score_weights": EXEC_SCORE_WEIGHTS,
+        "score_thresholds": EXEC_SCORE_THRESHOLDS,
     })
 
 @app.route("/api/pnl_curve")

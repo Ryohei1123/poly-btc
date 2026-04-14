@@ -49,8 +49,108 @@ def env_float(name: str, default: float) -> float:
 def env_int(name: str, default: int) -> int:
     return env_value(name, default, int)
 
+STRATEGY_PRESETS: dict[str, dict[str, float | int]] = {
+    # Lower risk / slower turnover.
+    "conservative": {
+        "POLY_SPREAD_PCT": 0.05,
+        "POLY_MIN_EDGE": 0.02,
+        "POLY_ORDER_SIZE": 30.0,
+        "POLY_MAX_POSITION": 300.0,
+        "POLY_QUOTE_REFRESH_SEC": 40,
+        "POLY_MARKETS_WATCHED": 8,
+        "POLY_MARKETS_FETCH_LIMIT": 800,
+        "POLY_MIN_MARKET_LIQUIDITY": 2000.0,
+        "POLY_MAX_DAILY_LOSS": 120.0,
+        "POLY_MAX_OPEN_ORDERS": 30,
+        "POLY_INVENTORY_SOFT_LIMIT_PCT": 0.50,
+        "POLY_INVENTORY_HARD_LIMIT_PCT": 0.75,
+        "POLY_INVENTORY_SKEW_PCT": 0.015,
+        "POLY_PASSIVE_BUFFER_TICKS": 2,
+        "POLY_MIN_MID_DISTANCE_PCT": 0.008,
+        "POLY_MAX_MID_DISTANCE_PCT": 0.25,
+        "POLY_MAX_ORDERS_PER_CYCLE": 14,
+    },
+    # Current default behavior.
+    "balanced": {},
+    # Target-wallet style: broad market coverage, moderate spread, fast cadence.
+    "target_clone": {
+        "POLY_SPREAD_PCT": 0.035,
+        "POLY_MIN_EDGE": 0.012,
+        "POLY_ORDER_SIZE": 60.0,
+        "POLY_MAX_POSITION": 700.0,
+        "POLY_QUOTE_REFRESH_SEC": 20,
+        "POLY_MARKETS_WATCHED": 18,
+        "POLY_MARKETS_FETCH_LIMIT": 2000,
+        "POLY_MIN_MARKET_LIQUIDITY": 1000.0,
+        "POLY_MAX_DAILY_LOSS": 350.0,
+        "POLY_MAX_OPEN_ORDERS": 70,
+        "POLY_INVENTORY_SOFT_LIMIT_PCT": 0.65,
+        "POLY_INVENTORY_HARD_LIMIT_PCT": 0.92,
+        "POLY_INVENTORY_SKEW_PCT": 0.01,
+        "POLY_PASSIVE_BUFFER_TICKS": 1,
+        "POLY_MIN_MID_DISTANCE_PCT": 0.004,
+        "POLY_MAX_MID_DISTANCE_PCT": 0.30,
+        "POLY_MAX_ORDERS_PER_CYCLE": 28,
+    },
+    # Higher throughput / higher inventory risk.
+    "aggressive": {
+        "POLY_SPREAD_PCT": 0.03,
+        "POLY_MIN_EDGE": 0.01,
+        "POLY_ORDER_SIZE": 75.0,
+        "POLY_MAX_POSITION": 900.0,
+        "POLY_QUOTE_REFRESH_SEC": 20,
+        "POLY_MARKETS_WATCHED": 20,
+        "POLY_MARKETS_FETCH_LIMIT": 2000,
+        "POLY_MIN_MARKET_LIQUIDITY": 800.0,
+        "POLY_MAX_DAILY_LOSS": 450.0,
+        "POLY_MAX_OPEN_ORDERS": 80,
+        "POLY_INVENTORY_SOFT_LIMIT_PCT": 0.70,
+        "POLY_INVENTORY_HARD_LIMIT_PCT": 0.95,
+        "POLY_INVENTORY_SKEW_PCT": 0.008,
+        "POLY_PASSIVE_BUFFER_TICKS": 1,
+        "POLY_MIN_MID_DISTANCE_PCT": 0.003,
+        "POLY_MAX_MID_DISTANCE_PCT": 0.35,
+        "POLY_MAX_ORDERS_PER_CYCLE": 36,
+    },
+}
+
+def selected_profile() -> str:
+    raw = (os.getenv("POLY_STRATEGY_PROFILE", "balanced") or "").strip().lower()
+    return raw if raw in STRATEGY_PRESETS else "balanced"
+
+def env_float_profile(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+    profile_defaults = STRATEGY_PRESETS.get(selected_profile(), {})
+    if name in profile_defaults:
+        try:
+            return float(profile_defaults[name])
+        except (TypeError, ValueError):
+            return default
+    return default
+
+def env_int_profile(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+    profile_defaults = STRATEGY_PRESETS.get(selected_profile(), {})
+    if name in profile_defaults:
+        try:
+            return int(profile_defaults[name])
+        except (TypeError, ValueError):
+            return default
+    return default
+
 @dataclass
 class Config:
+    STRATEGY_PROFILE: str = field(default_factory=selected_profile)
     # API endpoints
     GAMMA_API: str = "https://gamma-api.polymarket.com"
     CLOB_API: str  = "https://clob.polymarket.com"
@@ -61,26 +161,34 @@ class Config:
     BTC_REFERENCE_REFRESH_SEC: int = field(default_factory=lambda: env_int("POLY_BTC_REFERENCE_REFRESH_SEC", 120))
 
     # Trading parameters
-    SPREAD_PCT: float = 0.04       # Quote ±2% around fair price (captures 4% spread)
-    MIN_EDGE: float   = 0.015      # Minimum edge over midpoint to place order
-    ORDER_SIZE: float = 50.0       # USDC notional per side per quote
-    MAX_POSITION: float = 500.0    # Max USDC in any single market
-    QUOTE_REFRESH_SEC: int = 30    # How often to refresh quotes
-    MARKETS_WATCHED: int = 10      # How many BTC markets to watch
+    SPREAD_PCT: float = field(default_factory=lambda: env_float_profile("POLY_SPREAD_PCT", 0.04))         # Quote ±2% around fair price (captures 4% spread)
+    MIN_EDGE: float   = field(default_factory=lambda: env_float_profile("POLY_MIN_EDGE", 0.015))          # Minimum edge over midpoint to place order
+    ORDER_SIZE: float = field(default_factory=lambda: env_float_profile("POLY_ORDER_SIZE", 50.0))         # USDC notional per side per quote
+    MAX_POSITION: float = field(default_factory=lambda: env_float_profile("POLY_MAX_POSITION", 500.0))    # Max USDC in any single market
+    QUOTE_REFRESH_SEC: int = field(default_factory=lambda: env_int_profile("POLY_QUOTE_REFRESH_SEC", 30)) # How often to refresh quotes
+    MARKETS_WATCHED: int = field(default_factory=lambda: env_int_profile("POLY_MARKETS_WATCHED", 10))     # How many BTC markets to watch
+    MARKETS_FETCH_LIMIT: int = field(default_factory=lambda: env_int_profile("POLY_MARKETS_FETCH_LIMIT", 1000)) # Raw market fetch size before filtering
+    MIN_MARKET_LIQUIDITY: float = field(default_factory=lambda: env_float_profile("POLY_MIN_MARKET_LIQUIDITY", 1000.0)) # Minimum market liquidity to quote
     PAPER_FILL_BASE: float = 0.20  # Base fill probability in paper mode
     PAPER_INITIAL_BALANCE: float = field(default_factory=lambda: env_float("POLY_PAPER_INITIAL_BALANCE", 500.0))  # Paper account starting balance (USDC)
     FORCE_PAPER: bool = field(default_factory=lambda: env_bool("POLY_FORCE_PAPER", True))
     EXECUTION_MODE: str = field(default_factory=lambda: os.getenv("POLY_EXECUTION_MODE", "paper").strip().lower())
     ENABLE_LIVE_TRADING: bool = field(default_factory=lambda: env_bool("POLY_ENABLE_LIVE_TRADING", False))
     MIN_ORDER_SHARES: float = field(default_factory=lambda: env_float("POLY_MIN_ORDER_SHARES", 5.0))
-    MAX_ORDERS_PER_CYCLE: int = field(default_factory=lambda: env_int("POLY_MAX_ORDERS_PER_CYCLE", 20))
+    MAX_ORDERS_PER_CYCLE: int = field(default_factory=lambda: env_int_profile("POLY_MAX_ORDERS_PER_CYCLE", 20))
     CANCEL_BEFORE_REQUOTE: bool = field(default_factory=lambda: env_bool("POLY_CANCEL_BEFORE_REQUOTE", True))
     ANCHOR_EVENT_HAZARD_PER_DAY: float = field(default_factory=lambda: env_float("POLY_ANCHOR_EVENT_HAZARD_PER_DAY", 0.001))
     GTA_RELEASE_HAZARD_PER_DAY: float = field(default_factory=lambda: env_float("POLY_GTA_RELEASE_HAZARD_PER_DAY", 0.0002))
 
     # Risk
-    MAX_DAILY_LOSS: float = 200.0  # Kill switch: stop if daily PnL < -$200
-    MAX_OPEN_ORDERS: int = 40      # Cancel all if exceeded
+    MAX_DAILY_LOSS: float = field(default_factory=lambda: env_float_profile("POLY_MAX_DAILY_LOSS", 200.0)) # Kill switch: stop if daily PnL < -$200
+    MAX_OPEN_ORDERS: int = field(default_factory=lambda: env_int_profile("POLY_MAX_OPEN_ORDERS", 40))      # Cancel all if exceeded
+    INVENTORY_SOFT_LIMIT_PCT: float = field(default_factory=lambda: env_float_profile("POLY_INVENTORY_SOFT_LIMIT_PCT", 0.60)) # One-sided quoting starts beyond this ratio
+    INVENTORY_HARD_LIMIT_PCT: float = field(default_factory=lambda: env_float_profile("POLY_INVENTORY_HARD_LIMIT_PCT", 0.90)) # Strictly block risk-increasing side
+    INVENTORY_SKEW_PCT: float = field(default_factory=lambda: env_float_profile("POLY_INVENTORY_SKEW_PCT", 0.01))             # Midpoint skew to rebalance inventory
+    PASSIVE_BUFFER_TICKS: int = field(default_factory=lambda: env_int_profile("POLY_PASSIVE_BUFFER_TICKS", 1))               # Keep quotes at least N ticks away from opposite top-of-book
+    MIN_MID_DISTANCE_PCT: float = field(default_factory=lambda: env_float_profile("POLY_MIN_MID_DISTANCE_PCT", 0.005))       # Minimum bid/ask distance from mid to avoid crossing/taking
+    MAX_MID_DISTANCE_PCT: float = field(default_factory=lambda: env_float_profile("POLY_MAX_MID_DISTANCE_PCT", 0.30))        # Maximum distance from mid (too far quotes are clipped)
 
     # Auth (set via env or .env file)
     PRIVATE_KEY: str = field(default_factory=lambda: os.getenv("POLY_PRIVATE_KEY", ""))
@@ -179,8 +287,8 @@ SQL_UPSERT_BOT_STATS = """INSERT INTO bot_stats
                active_markets = EXCLUDED.active_markets"""
 SQL_DAILY_PNL = "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='filled' AND ts > (NOW() - INTERVAL '1 day')"
 SQL_UPSERT_RUNTIME_STATE = """INSERT INTO runtime_state
-           (id,updated_at,running,kill_switch,paper_mode,btc_price,btc_source,ws_connected,ws_tick_age_sec,cycle_latency_ms,orders_placed_cycle,cycle_latency_avg_ms,orders_placed_avg,last_cycle,errors)
-           VALUES (1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           (id,updated_at,running,kill_switch,paper_mode,btc_price,btc_source,ws_connected,ws_tick_age_sec,cycle_latency_ms,orders_placed_cycle,cycle_latency_avg_ms,orders_placed_avg,quotes_considered_cycle,quotes_eligible_cycle,order_attempts_cycle,order_acks_cycle,fills_cycle,quote_hit_rate_cycle,ack_rate_cycle,fill_rate_cycle,avg_edge_cycle,avg_order_distance_cycle,quote_hit_rate_avg,ack_rate_avg,fill_rate_avg,avg_edge_avg,avg_order_distance_avg,last_cycle,errors)
+           VALUES (1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
            ON CONFLICT (id) DO UPDATE
            SET updated_at = EXCLUDED.updated_at,
                running = EXCLUDED.running,
@@ -194,6 +302,21 @@ SQL_UPSERT_RUNTIME_STATE = """INSERT INTO runtime_state
                orders_placed_cycle = EXCLUDED.orders_placed_cycle,
                cycle_latency_avg_ms = EXCLUDED.cycle_latency_avg_ms,
                orders_placed_avg = EXCLUDED.orders_placed_avg,
+               quotes_considered_cycle = EXCLUDED.quotes_considered_cycle,
+               quotes_eligible_cycle = EXCLUDED.quotes_eligible_cycle,
+               order_attempts_cycle = EXCLUDED.order_attempts_cycle,
+               order_acks_cycle = EXCLUDED.order_acks_cycle,
+               fills_cycle = EXCLUDED.fills_cycle,
+               quote_hit_rate_cycle = EXCLUDED.quote_hit_rate_cycle,
+               ack_rate_cycle = EXCLUDED.ack_rate_cycle,
+               fill_rate_cycle = EXCLUDED.fill_rate_cycle,
+               avg_edge_cycle = EXCLUDED.avg_edge_cycle,
+               avg_order_distance_cycle = EXCLUDED.avg_order_distance_cycle,
+               quote_hit_rate_avg = EXCLUDED.quote_hit_rate_avg,
+               ack_rate_avg = EXCLUDED.ack_rate_avg,
+               fill_rate_avg = EXCLUDED.fill_rate_avg,
+               avg_edge_avg = EXCLUDED.avg_edge_avg,
+               avg_order_distance_avg = EXCLUDED.avg_order_distance_avg,
                last_cycle = EXCLUDED.last_cycle,
                errors = EXCLUDED.errors"""
 
@@ -216,6 +339,8 @@ class Market:
     no_token: str
     yes_price: float
     no_price: float
+    best_bid: float
+    best_ask: float
     volume: float
     liquidity: float
     end_date_iso: str
@@ -259,6 +384,26 @@ class BotState:
     orders_placed_avg: float = 0.0
     cycle_latency_window: list[float] = field(default_factory=list)
     orders_placed_window: list[int] = field(default_factory=list)
+    quotes_considered_cycle: int = 0
+    quotes_eligible_cycle: int = 0
+    order_attempts_cycle: int = 0
+    order_acks_cycle: int = 0
+    fills_cycle: int = 0
+    quote_hit_rate_cycle: float = 0.0
+    ack_rate_cycle: float = 0.0
+    fill_rate_cycle: float = 0.0
+    avg_edge_cycle: float = 0.0
+    avg_order_distance_cycle: float = 0.0
+    quote_hit_rate_avg: float = 0.0
+    ack_rate_avg: float = 0.0
+    fill_rate_avg: float = 0.0
+    avg_edge_avg: float = 0.0
+    avg_order_distance_avg: float = 0.0
+    quote_hit_rate_window: list[float] = field(default_factory=list)
+    ack_rate_window: list[float] = field(default_factory=list)
+    fill_rate_window: list[float] = field(default_factory=list)
+    avg_edge_window: list[float] = field(default_factory=list)
+    avg_order_distance_window: list[float] = field(default_factory=list)
 
 state = BotState()
 
@@ -320,6 +465,13 @@ def get_market_exposure(market_id: str) -> float:
     avg = max(0.01, float(pos.get("avg_price", 0.0)))
     return round(qty * avg, 4)
 
+def get_market_position_qty(market_id: str) -> float:
+    """Signed YES share inventory for a market (+long / -short)."""
+    pos = state.open_positions.get(market_id)
+    if not pos:
+        return 0.0
+    return float(pos.get("qty", 0.0))
+
 def refresh_account_state():
     """Refresh balance/equity fields for paper-mode accounting."""
     if state.paper_mode:
@@ -346,6 +498,48 @@ def update_cycle_telemetry(orders_placed: int, cycle_started: float) -> None:
     state.cycle_latency_avg_ms = round(
         sum(state.cycle_latency_window) / max(1, len(state.cycle_latency_window)),
         2,
+    )
+
+def update_execution_telemetry(
+    quotes_considered: int,
+    quotes_eligible: int,
+    order_attempts: int,
+    order_acks: int,
+    fills: int,
+    edge_sum: float,
+    edge_count: int,
+    order_distance_sum: float,
+    order_distance_count: int,
+) -> None:
+    state.quotes_considered_cycle = int(quotes_considered)
+    state.quotes_eligible_cycle = int(quotes_eligible)
+    state.order_attempts_cycle = int(order_attempts)
+    state.order_acks_cycle = int(order_acks)
+    state.fills_cycle = int(fills)
+    state.quote_hit_rate_cycle = round((quotes_eligible / quotes_considered), 4) if quotes_considered > 0 else 0.0
+    state.ack_rate_cycle = round((order_acks / order_attempts), 4) if order_attempts > 0 else 0.0
+    state.fill_rate_cycle = round((fills / order_acks), 4) if order_acks > 0 else 0.0
+    state.avg_edge_cycle = round((edge_sum / edge_count), 6) if edge_count > 0 else 0.0
+    state.avg_order_distance_cycle = round((order_distance_sum / order_distance_count), 6) if order_distance_count > 0 else 0.0
+
+    for window, value in (
+        (state.quote_hit_rate_window, state.quote_hit_rate_cycle),
+        (state.ack_rate_window, state.ack_rate_cycle),
+        (state.fill_rate_window, state.fill_rate_cycle),
+        (state.avg_edge_window, state.avg_edge_cycle),
+        (state.avg_order_distance_window, state.avg_order_distance_cycle),
+    ):
+        window.append(float(value))
+        if len(window) > 10:
+            window.pop(0)
+
+    state.quote_hit_rate_avg = round(sum(state.quote_hit_rate_window) / max(1, len(state.quote_hit_rate_window)), 4)
+    state.ack_rate_avg = round(sum(state.ack_rate_window) / max(1, len(state.ack_rate_window)), 4)
+    state.fill_rate_avg = round(sum(state.fill_rate_window) / max(1, len(state.fill_rate_window)), 4)
+    state.avg_edge_avg = round(sum(state.avg_edge_window) / max(1, len(state.avg_edge_window)), 6)
+    state.avg_order_distance_avg = round(
+        sum(state.avg_order_distance_window) / max(1, len(state.avg_order_distance_window)),
+        6,
     )
 
 # ─── Market Data ──────────────────────────────────────────────────────────────
@@ -444,7 +638,7 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
                 "active": "true",
                 "closed": "false",
                 "tag_slug": "crypto",
-                "limit": 500,
+                "limit": max(100, min(config.MARKETS_FETCH_LIMIT, 3000)),
                 "_order": "volume",
             },
             timeout=aiohttp.ClientTimeout(total=10)
@@ -467,7 +661,8 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
             str(m.get(k, "") or "")
             for k in ("description", "rules", "resolutionSource", "resolution")
         )
-        if classify_market_model(m.get("question", ""), rules_text) == "unsupported":
+        model_type = classify_market_model(m.get("question", ""), rules_text)
+        if model_type == "unsupported":
             skipped_unsupported += 1
             continue
 
@@ -548,6 +743,8 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
             no_token=no_token,
             yes_price=yes_price,
             no_price=no_price,
+            best_bid=float(m.get("bestBid", 0) or 0),
+            best_ask=float(m.get("bestAsk", 0) or 0),
             volume=float(m.get("volume", 0) or 0),
             liquidity=float(m.get("liquidity", 0) or 0),
             end_date_iso=m.get("endDate", ""),
@@ -555,8 +752,17 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
             active=True
         ))
 
-    # Sort by volume, take top N
-    results.sort(key=lambda x: x.volume, reverse=True)
+    def market_priority_score(market: Market) -> float:
+        # Favor deep/liquid markets with balanced probabilities and usable horizon.
+        vol_score = math.log1p(max(0.0, market.volume))
+        liq_score = math.log1p(max(0.0, market.liquidity))
+        balance_score = max(0.0, 1.0 - abs(market.yes_price - 0.5) * 2.0)
+        dte = get_days_to_expiry(market.end_date_iso)
+        horizon_score = 1.0 if 0.5 < dte <= 45 else (0.5 if dte > 45 else 0.0)
+        return (0.55 * vol_score) + (0.35 * liq_score) + (2.0 * balance_score) + horizon_score
+
+    # Rank by priority score (not raw volume only) to broaden actionable coverage.
+    results.sort(key=market_priority_score, reverse=True)
     state.active_markets = results[:config.MARKETS_WATCHED]
     if skipped_unsupported:
         log.info(f"Skipped {skipped_unsupported} unsupported BTC market structures")
@@ -580,34 +786,59 @@ async def get_order_book_mid(session: aiohttp.ClientSession, token_id: str) -> O
 
 # ─── Fair Probability Calculator ──────────────────────────────────────────────
 
-def extract_strike_from_question(question: str) -> Optional[float]:
+def extract_price_levels(text: str) -> list[float]:
+    """
+    Extract ordered dollar-denominated levels from free text.
+    Supports formats like $90,000, $95k, $1m, $90000.
+    """
+    if not text:
+        return []
+    matches = re.finditer(
+        r"\$([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+(?:\.[0-9]+)?)([km]?)\b",
+        text,
+        re.IGNORECASE,
+    )
+    out: list[float] = []
+    for m in matches:
+        base_raw = m.group(1).replace(",", "")
+        suffix = (m.group(2) or "").lower()
+        try:
+            value = float(base_raw)
+        except ValueError:
+            continue
+        if suffix == "k":
+            value *= 1_000.0
+        elif suffix == "m":
+            value *= 1_000_000.0
+        out.append(value)
+    return out
+
+def extract_strike_from_question(question: str, rules_text: str = "") -> Optional[float]:
     """
     Parse strike price from questions like:
     "Will Bitcoin be above $90,000 on Dec 31?"
     "BTC above $95k by end of month?"
     """
-    # Match patterns like $90,000 or $95k or $90000
-    patterns = [
-        r'\$([0-9]{1,3}(?:,[0-9]{3})+)',  # $90,000
-        r'\$([0-9]+)k\b',                  # $95k
-        r'\$([0-9]+(?:\.[0-9]+)?)m\b',     # $1m, $1.5m
-        r'\$([0-9]{4,6})\b',               # $90000
-    ]
-    for pat in patterns:
-        m = re.search(pat, question, re.IGNORECASE)
-        if m:
-            val = m.group(1).replace(",", "")
-            token = question[m.start():m.end()].lower()
-            mult = 1
-            if "k" in token:
-                mult = 1000
-            elif "m" in token:
-                mult = 1_000_000
-            return float(val) * mult
+    levels_q = extract_price_levels(question)
+    if levels_q:
+        return levels_q[0]
+    levels_rules = extract_price_levels(rules_text)
+    if levels_rules:
+        return levels_rules[0]
     return None
 
-def has_explicit_time_cue(question: str) -> bool:
-    q = (question or "").lower()
+def extract_price_range(question: str, rules_text: str = "") -> Optional[tuple[float, float]]:
+    levels = extract_price_levels(question)
+    if len(levels) < 2 and rules_text:
+        levels = levels + extract_price_levels(rules_text)
+    if len(levels) < 2:
+        return None
+    a, b = levels[0], levels[1]
+    lo, hi = (a, b) if a <= b else (b, a)
+    return (lo, hi)
+
+def has_explicit_time_cue(question: str, rules_text: str = "") -> bool:
+    q = f"{(question or '').lower()} {(rules_text or '').lower()}".strip()
     if not q:
         return False
     month_names = (
@@ -633,9 +864,13 @@ def classify_market_model(question: str, rules_text: str = "") -> str:
     if not q:
         return "unsupported"
 
-    strike = extract_strike_from_question(question)
+    strike = extract_strike_from_question(question, rules_text)
     if strike is None:
         return "unsupported"
+
+    if ("between" in q or "range" in q) and extract_price_range(question, rules_text):
+        if has_explicit_time_cue(q, rules):
+            return "range_terminal"
 
     terminal_patterns = (
         r"\bbe above\b",
@@ -659,15 +894,18 @@ def classify_market_model(question: str, rules_text: str = "") -> str:
         r"\breaches\b",
         r"\btouch\b",
         r"\btouches\b",
+        r"\bdip to\b",
+        r"\bdrop to\b",
+        r"\bfall to\b",
     )
     has_barrier_verb = any(re.search(pat, q) for pat in barrier_patterns)
     if has_barrier_verb:
         if " before " in q and ("50-50" in rules or "50 50" in rules):
             return "comparative_5050"
         # Exclude comparative-event structures like "before GTA VI".
-        if " before " in q and not has_explicit_time_cue(q.replace(" before ", " ")):
+        if " before " in q and not has_explicit_time_cue(q.replace(" before ", " "), rules):
             return "unsupported"
-        if not has_explicit_time_cue(q):
+        if not has_explicit_time_cue(q, rules):
             return "unsupported"
         return "barrier"
 
@@ -696,6 +934,21 @@ def calc_fair_probability(btc_price: float, strike: float, days_to_expiry: float
         return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
     return norm_cdf(d2)
+
+def calc_range_terminal_probability(
+    btc_price: float,
+    low: float,
+    high: float,
+    days_to_expiry: float,
+) -> float:
+    """
+    Approximate terminal probability that BTC finishes in [low, high].
+    """
+    if low <= 0 or high <= 0 or high <= low:
+        return 0.0
+    p_gt_low = calc_fair_probability(btc_price, low, days_to_expiry)
+    p_gt_high = calc_fair_probability(btc_price, high, days_to_expiry)
+    return max(0.0, min(1.0, p_gt_low - p_gt_high))
 
 def calc_barrier_hit_probability(btc_price: float, barrier: float, days_to_expiry: float) -> float:
     """
@@ -792,13 +1045,19 @@ async def compute_quote(session: aiohttp.ClientSession, market: Market) -> Optio
     if model == "unsupported":
         return None
 
-    strike = extract_strike_from_question(market.question)
+    strike = extract_strike_from_question(market.question, market.rules_text)
     if strike is None:
         log.debug(f"Could not parse strike from: {market.question}")
         return None
 
     dte = get_days_to_expiry(market.end_date_iso)
-    if model == "barrier":
+    if model == "range_terminal":
+        range_bounds = extract_price_range(market.question, market.rules_text)
+        if not range_bounds:
+            return None
+        low, high = range_bounds
+        fair = calc_range_terminal_probability(btc, low, high, dte)
+    elif model == "barrier":
         fair = calc_barrier_hit_probability(btc, strike, dte)
     elif model == "comparative_5050":
         fair = calc_comparative_5050_probability(
@@ -826,6 +1085,29 @@ async def compute_quote(session: aiohttp.ClientSession, market: Market) -> Optio
     # Clamp to valid tick range
     bid = max(0.01, min(0.99, bid))
     ask = max(0.01, min(0.99, ask))
+
+    tick = 0.01
+    passive_buffer = max(1, int(config.PASSIVE_BUFFER_TICKS)) * tick
+
+    # Post-only style guard: keep our bid below opposite best ask and our ask above
+    # opposite best bid whenever top-of-book is available from Gamma.
+    top_bid = max(0.0, float(market.best_bid))
+    top_ask = max(0.0, float(market.best_ask))
+    if top_ask > 0:
+        bid = min(bid, max(0.01, round(top_ask - passive_buffer, 2)))
+    if top_bid > 0:
+        ask = max(ask, min(0.99, round(top_bid + passive_buffer, 2)))
+
+    # Distance guards around midpoint: avoid too-aggressive (taker-like) and too-far quotes.
+    min_mid_dist = max(0.0, float(config.MIN_MID_DISTANCE_PCT))
+    max_mid_dist = max(min_mid_dist + tick, float(config.MAX_MID_DISTANCE_PCT))
+    bid = min(bid, round(max(0.01, mid - min_mid_dist), 2))
+    ask = max(ask, round(min(0.99, mid + min_mid_dist), 2))
+    bid = max(bid, round(max(0.01, mid - max_mid_dist), 2))
+    ask = min(ask, round(min(0.99, mid + max_mid_dist), 2))
+
+    bid = max(0.01, min(0.99, round(bid, 2)))
+    ask = max(0.01, min(0.99, round(ask, 2)))
     if bid >= ask:
         return None
 
@@ -834,7 +1116,7 @@ async def compute_quote(session: aiohttp.ClientSession, market: Market) -> Optio
     should_place = (
         edge >= config.MIN_EDGE
         and dte > 0.5          # Don't trade within 12hrs of expiry
-        and market.liquidity > 1000  # Require at least $1k liquidity
+        and market.liquidity > config.MIN_MARKET_LIQUIDITY
         and not state.kill_switch
     )
 
@@ -921,7 +1203,7 @@ async def place_order(
     market: Market,
     edge: float = 0.0,
     mid: Optional[float] = None,
-) -> Optional[str]:
+) -> Optional[tuple[str, str]]:
     """
     Place a limit order via the CLOB API.
     Requires POLY_PRIVATE_KEY, POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE
@@ -1045,7 +1327,7 @@ async def place_order(
             pnl=trade_pnl,
             fill_price=fill_price,
         )
-        return order_id
+        return (order_id, status)
 
     # --- Live trading via py-clob-client ---
     # Install: pip install py-clob-client
@@ -1078,7 +1360,7 @@ async def place_order(
             f"[LIVE] {side} ${notional_usdc:.2f} ({size_shares:.4f} shares) "
             f"@ {price:.3f} order_id={real_id[:16]}"
         )
-        return real_id
+        return (real_id, "open")
 
     except ImportError:
         log.critical("py-clob-client not installed. Live trading cannot run.")
@@ -1171,7 +1453,7 @@ async def main_loop():
     state.starting_balance = config.PAPER_INITIAL_BALANCE
     refresh_account_state()
     log.info(
-        f"Config: spread={config.SPREAD_PCT*100:.1f}%  min_edge={config.MIN_EDGE*100:.1f}%  "
+        f"Config: profile={config.STRATEGY_PROFILE} spread={config.SPREAD_PCT*100:.1f}%  min_edge={config.MIN_EDGE*100:.1f}%  "
         f"notional=${config.ORDER_SIZE} mode={'paper' if state.paper_mode else 'live'} "
         f"starting_balance=${state.starting_balance:.2f}"
     )
@@ -1199,8 +1481,30 @@ async def main_loop():
                 # 3. Check kill switch
                 check_kill_switch()
                 placed_count = 0
+                buy_orders = 0
+                sell_orders = 0
+                quotes_considered = 0
+                quotes_eligible = 0
+                order_attempts = 0
+                order_acks = 0
+                fills = 0
+                edge_sum = 0.0
+                edge_count = 0
+                order_distance_sum = 0.0
+                order_distance_count = 0
                 if state.kill_switch:
                     log.warning("Kill switch active — skipping order placement")
+                    update_execution_telemetry(
+                        quotes_considered=0,
+                        quotes_eligible=0,
+                        order_attempts=0,
+                        order_acks=0,
+                        fills=0,
+                        edge_sum=0.0,
+                        edge_count=0,
+                        order_distance_sum=0.0,
+                        order_distance_count=0,
+                    )
                 else:
                     if is_live_mode() and config.CANCEL_BEFORE_REQUOTE:
                         cancelled = cancel_live_orders_best_effort()
@@ -1211,6 +1515,7 @@ async def main_loop():
                         quote = await compute_quote(session, market)
                         if quote is None:
                             continue
+                        quotes_considered += 1
 
                         log.info(
                             f"  {market.question[:55]:55s}  "
@@ -1221,9 +1526,43 @@ async def main_loop():
                         )
 
                         if quote.should_place:
+                            quotes_eligible += 1
+                            edge_sum += float(quote.edge)
+                            edge_count += 1
+                            inv_qty = get_market_position_qty(market.condition_id)
+                            max_qty_hint = config.MAX_POSITION / max(quote.mid, 0.01)
+                            inv_ratio = inv_qty / max(max_qty_hint, 1e-6)
+
+                            # Inventory-aware skew: long YES inventory shifts both quotes down;
+                            # short inventory shifts both quotes up.
+                            skew = max(-1.0, min(1.0, inv_ratio)) * config.INVENTORY_SKEW_PCT
+                            bid_px = max(0.01, min(0.99, round(quote.bid - skew, 2)))
+                            ask_px = max(0.01, min(0.99, round(quote.ask - skew, 2)))
+                            if bid_px >= ask_px:
+                                ask_px = min(0.99, round(bid_px + 0.01, 2))
+
+                            allow_buy = True
+                            allow_sell = True
+                            if inv_ratio >= config.INVENTORY_SOFT_LIMIT_PCT:
+                                allow_buy = False
+                            if inv_ratio <= -config.INVENTORY_SOFT_LIMIT_PCT:
+                                allow_sell = False
+                            if inv_ratio >= config.INVENTORY_HARD_LIMIT_PCT:
+                                allow_buy = False
+                            if inv_ratio <= -config.INVENTORY_HARD_LIMIT_PCT:
+                                allow_sell = False
+
+                            if not allow_buy and not allow_sell:
+                                log.info(
+                                    f"Inventory guard for {market.condition_id[:12]}: "
+                                    f"qty={inv_qty:.2f} ratio={inv_ratio:.2f}, skipping both sides"
+                                )
+                                continue
+
                             if state.paper_mode:
                                 exposure = get_total_exposure()
-                                projected = exposure + (2.0 * config.ORDER_SIZE)
+                                sides_to_place = int(allow_buy) + int(allow_sell)
+                                projected = exposure + (sides_to_place * config.ORDER_SIZE)
                                 if projected > state.equity:
                                     log.warning(
                                         f"Paper balance guard: projected exposure ${projected:.2f} > equity ${state.equity:.2f}. "
@@ -1231,7 +1570,7 @@ async def main_loop():
                                     )
                                     continue
                             market_exposure = get_market_exposure(market.condition_id)
-                            projected_market = market_exposure + config.ORDER_SIZE
+                            projected_market = market_exposure + (max(int(allow_buy), int(allow_sell)) * config.ORDER_SIZE)
                             if projected_market > config.MAX_POSITION:
                                 log.info(
                                     f"Max position guard for market {market.condition_id[:12]}: "
@@ -1243,31 +1582,67 @@ async def main_loop():
                                     f"Max orders per cycle reached ({config.MAX_ORDERS_PER_CYCLE}), stopping quote placement"
                                 )
                                 break
-                            # Place bid + ask
-                            await place_order(
-                                session,
-                                market.yes_token,
-                                "BUY",
-                                quote.bid,
-                                config.ORDER_SIZE,
-                                market,
-                                edge=quote.edge,
-                                mid=quote.mid,
-                            )
-                            await place_order(
-                                session,
-                                market.yes_token,
-                                "SELL",
-                                quote.ask,
-                                config.ORDER_SIZE,
-                                market,
-                                edge=quote.edge,
-                                mid=quote.mid,
-                            )
+
+                            # Place one or both sides depending on inventory risk.
+                            if allow_buy:
+                                order_attempts += 1
+                                order_distance_sum += abs(bid_px - quote.mid)
+                                order_distance_count += 1
+                                buy_res = await place_order(
+                                    session,
+                                    market.yes_token,
+                                    "BUY",
+                                    bid_px,
+                                    config.ORDER_SIZE,
+                                    market,
+                                    edge=quote.edge,
+                                    mid=quote.mid,
+                                )
+                                if buy_res:
+                                    buy_id, buy_status = buy_res
+                                    buy_orders += 1
+                                    order_acks += 1
+                                    if buy_status == "filled":
+                                        fills += 1
+                            if allow_sell:
+                                order_attempts += 1
+                                order_distance_sum += abs(ask_px - quote.mid)
+                                order_distance_count += 1
+                                sell_res = await place_order(
+                                    session,
+                                    market.yes_token,
+                                    "SELL",
+                                    ask_px,
+                                    config.ORDER_SIZE,
+                                    market,
+                                    edge=quote.edge,
+                                    mid=quote.mid,
+                                )
+                                if sell_res:
+                                    sell_id, sell_status = sell_res
+                                    sell_orders += 1
+                                    order_acks += 1
+                                    if sell_status == "filled":
+                                        fills += 1
+
                             placed_count += 1
                             await asyncio.sleep(0.3)  # Rate limit
 
-                    log.info(f"Placed quotes on {placed_count} markets this cycle")
+                    update_execution_telemetry(
+                        quotes_considered=quotes_considered,
+                        quotes_eligible=quotes_eligible,
+                        order_attempts=order_attempts,
+                        order_acks=order_acks,
+                        fills=fills,
+                        edge_sum=edge_sum,
+                        edge_count=edge_count,
+                        order_distance_sum=order_distance_sum,
+                        order_distance_count=order_distance_count,
+                    )
+                    log.info(
+                        f"Placed quotes on {placed_count} markets this cycle "
+                        f"(buy_orders={buy_orders}, sell_orders={sell_orders})"
+                    )
                     if state.paper_mode:
                         log.info(
                             f"Paper account: start=${state.starting_balance:.2f} "
@@ -1279,7 +1654,12 @@ async def main_loop():
                     f"Cycle telemetry: orders={state.orders_placed_cycle} "
                     f"orders_avg10={state.orders_placed_avg:.2f} "
                     f"latency_ms={state.cycle_latency_ms:.2f} "
-                    f"latency_avg10_ms={state.cycle_latency_avg_ms:.2f}"
+                    f"latency_avg10_ms={state.cycle_latency_avg_ms:.2f} "
+                    f"q_hit={state.quote_hit_rate_cycle:.2%}/{state.quote_hit_rate_avg:.2%} "
+                    f"ack={state.ack_rate_cycle:.2%}/{state.ack_rate_avg:.2%} "
+                    f"fill={state.fill_rate_cycle:.2%}/{state.fill_rate_avg:.2%} "
+                    f"edge={state.avg_edge_cycle:.4f}/{state.avg_edge_avg:.4f} "
+                    f"dist={state.avg_order_distance_cycle:.4f}/{state.avg_order_distance_avg:.4f}"
                 )
 
                 # 5. Update stats
@@ -1328,6 +1708,21 @@ def update_runtime_state():
             int(state.orders_placed_cycle),
             float(state.cycle_latency_avg_ms),
             float(state.orders_placed_avg),
+            int(state.quotes_considered_cycle),
+            int(state.quotes_eligible_cycle),
+            int(state.order_attempts_cycle),
+            int(state.order_acks_cycle),
+            int(state.fills_cycle),
+            float(state.quote_hit_rate_cycle),
+            float(state.ack_rate_cycle),
+            float(state.fill_rate_cycle),
+            float(state.avg_edge_cycle),
+            float(state.avg_order_distance_cycle),
+            float(state.quote_hit_rate_avg),
+            float(state.ack_rate_avg),
+            float(state.fill_rate_avg),
+            float(state.avg_edge_avg),
+            float(state.avg_order_distance_avg),
             state.last_cycle,
             len(state.errors),
         ),

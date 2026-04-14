@@ -53,6 +53,21 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS orders_placed_cycle INTEGER DEFAULT 0",
     "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS cycle_latency_avg_ms REAL DEFAULT 0",
     "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS orders_placed_avg REAL DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS quotes_considered_cycle INTEGER DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS quotes_eligible_cycle INTEGER DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS order_attempts_cycle INTEGER DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS order_acks_cycle INTEGER DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS fills_cycle INTEGER DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS quote_hit_rate_cycle REAL DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS ack_rate_cycle REAL DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS fill_rate_cycle REAL DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS avg_edge_cycle REAL DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS avg_order_distance_cycle REAL DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS quote_hit_rate_avg REAL DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS ack_rate_avg REAL DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS fill_rate_avg REAL DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS avg_edge_avg REAL DEFAULT 0",
+    "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS avg_order_distance_avg REAL DEFAULT 0",
     # Historical fix: normalize share count to notional/price when legacy rows were
     # written with midpoint-derived shares (causes impossible UI values).
     """UPDATE trades
