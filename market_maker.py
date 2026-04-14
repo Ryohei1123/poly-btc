@@ -99,6 +99,7 @@ def init_db(path: str):
             ts          TEXT    NOT NULL,
             market_id   TEXT    NOT NULL,
             market_slug TEXT,
+            event_slug  TEXT,
             market_q    TEXT,
             side        TEXT    NOT NULL,
             price       REAL    NOT NULL,
@@ -112,6 +113,8 @@ def init_db(path: str):
     trade_cols = {r[1] for r in con.execute("PRAGMA table_info(trades)").fetchall()}
     if "market_slug" not in trade_cols:
         con.execute("ALTER TABLE trades ADD COLUMN market_slug TEXT")
+    if "event_slug" not in trade_cols:
+        con.execute("ALTER TABLE trades ADD COLUMN event_slug TEXT")
     con.execute("""
         CREATE TABLE IF NOT EXISTS quotes (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,6 +169,7 @@ db = init_db(config.DB_PATH)
 class Market:
     condition_id: str
     slug: str
+    event_slug: str
     question: str
     yes_token: str
     no_token: str
@@ -323,6 +327,7 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
         results.append(Market(
             condition_id=m.get("conditionId", m.get("id", "")),
             slug=m.get("slug", ""),
+            event_slug=(m.get("events")[0].get("slug", "") if isinstance(m.get("events"), list) and m.get("events") else ""),
             question=m.get("question", ""),
             yes_token=yes_token,
             no_token=no_token,
@@ -590,10 +595,10 @@ async def place_order(
         )
         state.total_trades += 1
         db.execute(
-            """INSERT INTO trades (ts,market_id,market_slug,market_q,side,price,size,order_id,status,pnl,fill_price)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,side,price,size,order_id,status,pnl,fill_price)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (datetime.now(timezone.utc).isoformat(),
-             market.condition_id, market.slug, market.question,
+             market.condition_id, market.slug, market.event_slug, market.question,
              side, price, size, order_id, status, trade_pnl, fill_price)
         )
         db.commit()
@@ -629,10 +634,10 @@ async def place_order(
 
         state.total_trades += 1
         db.execute(
-            """INSERT INTO trades (ts,market_id,market_slug,market_q,side,price,size,order_id,status)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,side,price,size,order_id,status)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (datetime.now(timezone.utc).isoformat(),
-             market.condition_id, market.slug, market.question,
+             market.condition_id, market.slug, market.event_slug, market.question,
              side, price, size, real_id, "open")
         )
         db.commit()

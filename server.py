@@ -9,6 +9,8 @@ import sqlite3
 import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import urlopen
 from flask import Flask, jsonify, send_from_directory
 from dotenv import load_dotenv
 
@@ -19,6 +21,7 @@ DEFAULT_STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR = str(DEFAULT_STATIC_DIR if DEFAULT_STATIC_DIR.exists() else Path(__file__).parent)
 
 app = Flask(__name__, static_folder=STATIC_DIR)
+EVENT_SLUG_CACHE: dict[str, str] = {}
 
 def get_db():
     con = sqlite3.connect(DB_PATH)
@@ -31,12 +34,14 @@ def ensure_db():
     con = sqlite3.connect(DB_PATH)
     con.execute("""CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, market_id TEXT,
-        market_slug TEXT, market_q TEXT, side TEXT, price REAL, size REAL,
+        market_slug TEXT, event_slug TEXT, market_q TEXT, side TEXT, price REAL, size REAL,
         order_id TEXT, status TEXT DEFAULT 'open', pnl REAL DEFAULT 0, fill_price REAL
     )""")
     trade_cols = {r[1] for r in con.execute("PRAGMA table_info(trades)").fetchall()}
     if "market_slug" not in trade_cols:
         con.execute("ALTER TABLE trades ADD COLUMN market_slug TEXT")
+    if "event_slug" not in trade_cols:
+        con.execute("ALTER TABLE trades ADD COLUMN event_slug TEXT")
     con.execute("""CREATE TABLE IF NOT EXISTS quotes (
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, market_id TEXT,
         bid REAL, ask REAL, fair_price REAL, mid REAL, edge REAL, placed INTEGER DEFAULT 0
@@ -91,8 +96,8 @@ def _seed_demo_data(con):
         pnl = round(random.gauss(0.8, 1.2), 2)  # Positive edge mean
         total_pnl += pnl
         con.execute(
-            "INSERT INTO trades (ts,market_id,market_slug,market_q,side,price,size,order_id,status,pnl,fill_price) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (ts, mid, "", mq, side, price, size, f"ord_{i:04d}", "filled", pnl, round(price + 0.005 * (1 if side=="BUY" else -1), 3))
+            "INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,side,price,size,order_id,status,pnl,fill_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ts, mid, "", "", mq, side, price, size, f"ord_{i:04d}", "filled", pnl, round(price + 0.005 * (1 if side=="BUY" else -1), 3))
         )
 
     # BTC prices last 24hrs
@@ -123,6 +128,33 @@ def _seed_demo_data(con):
             "INSERT OR IGNORE INTO bot_stats (ts,total_trades,open_positions,realized_pnl,daily_pnl,active_markets) VALUES (?,?,?,?,?,?)",
             (ts, max(0,645-h), random.randint(3,8), round(pnl_acc,2), round(random.gauss(9100,1200),2), random.randint(5,10))
         )
+
+def resolve_event_slug(market_slug: str) -> str:
+    """
+    Resolve market slug -> event slug via Gamma API.
+    Cache in-memory to avoid repeated network calls on dashboard refresh.
+    """
+    slug = (market_slug or "").strip()
+    if not slug:
+        return ""
+    cached = EVENT_SLUG_CACHE.get(slug)
+    if cached is not None:
+        return cached
+    try:
+        query = urlencode({"slug": slug})
+        with urlopen(f"https://gamma-api.polymarket.com/markets?{query}", timeout=3) as resp:
+            import json
+            payload = json.loads(resp.read().decode("utf-8"))
+        if isinstance(payload, list) and payload:
+            events = payload[0].get("events")
+            if isinstance(events, list) and events:
+                event_slug = str(events[0].get("slug", "")).strip()
+                EVENT_SLUG_CACHE[slug] = event_slug
+                return event_slug
+    except Exception:
+        pass
+    EVENT_SLUG_CACHE[slug] = ""
+    return ""
 
 # ─── API endpoints ─────────────────────────────────────────────────────────────
 
@@ -241,14 +273,35 @@ def pnl_curve():
 def recent_trades():
     con = get_db()
     rows = con.execute(
-        """SELECT ts, market_id, market_slug, market_q, side, price, size, pnl, status
+        """SELECT ts, market_id, market_slug, event_slug, market_q, side, price, size, pnl, status
            FROM trades ORDER BY ts DESC LIMIT 75"""
     ).fetchall()
     out = []
     for r in rows:
         d = dict(r)
-        slug = (d.get("market_slug") or "").strip()
-        d["market_url"] = f"https://polymarket.com/event/{slug}" if slug else None
+        event_slug = (d.get("event_slug") or "").strip()
+        market_slug = (d.get("market_slug") or "").strip()
+        if not event_slug and market_slug:
+            # Backfill for old rows that only stored market slug.
+            event_slug = resolve_event_slug(market_slug)
+            if event_slug:
+                try:
+                    con.execute(
+                        "UPDATE trades SET event_slug=? WHERE market_slug=? AND (event_slug IS NULL OR event_slug='')",
+                        (event_slug, market_slug),
+                    )
+                    con.commit()
+                except Exception:
+                    pass
+        d["market_url"] = f"https://polymarket.com/event/{event_slug}" if event_slug else None
+        price = float(d.get("price") or 0.0)
+        size = float(d.get("size") or 0.0)
+        pnl = float(d.get("pnl") or 0.0)
+        # Market maker currently quotes YES token, so this indicates YES share flow.
+        d["outcome"] = "YES"
+        d["price_cents"] = round(price * 100.0, 2)
+        d["contracts"] = round(size / max(price, 0.01), 2)
+        d["return_pct"] = round((pnl / size * 100.0), 2) if size > 0 else 0.0
         out.append(d)
     return jsonify(out)
 
@@ -314,13 +367,14 @@ if __name__ == "__main__":
     ensure_db()
     host = os.getenv("POLY_DASHBOARD_HOST", "0.0.0.0")
     port = int(os.getenv("POLY_DASHBOARD_PORT", "5050"))
+    threads = int(os.getenv("POLY_DASHBOARD_THREADS", "12"))
     print("\n  🤖  Polymarket Bot Dashboard")
     print("  ─────────────────────────────")
     print(f"  http://localhost:{port}\n")
     try:
         from waitress import serve as waitress_serve
-        print(f"  Serving with Waitress on {host}:{port}")
-        waitress_serve(app, host=host, port=port)
+        print(f"  Serving with Waitress on {host}:{port} (threads={threads})")
+        waitress_serve(app, host=host, port=port, threads=threads)
     except Exception:
         # Fallback for local development if waitress is unavailable.
         print("  Waitress not available, falling back to Flask dev server")
