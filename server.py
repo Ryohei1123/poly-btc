@@ -6,10 +6,12 @@ Access: http://localhost:5050
 """
 
 import os
+import json
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 import psycopg
 from psycopg.rows import dict_row
 from flask import Flask, jsonify, send_from_directory, g
@@ -24,6 +26,12 @@ STATIC_DIR = str(DEFAULT_STATIC_DIR if DEFAULT_STATIC_DIR.exists() else Path(__f
 
 app = Flask(__name__, static_folder=STATIC_DIR)
 EVENT_SLUG_CACHE: dict[str, str] = {}
+GAMMA_API = "https://gamma-api.polymarket.com"
+BINANCE_API = "https://api.binance.com"
+LIVE_CACHE: dict[str, dict[str, object]] = {
+    "markets": {"ts": 0.0, "data": []},
+    "btc_history": {"ts": 0.0, "data": []},
+}
 
 SQL_COUNT_TRADES = "SELECT COUNT(*) AS cnt FROM trades"
 SQL_SUM_FILLED_PNL = "SELECT COALESCE(SUM(pnl), 0) AS pnl FROM trades WHERE status='filled'"
@@ -193,6 +201,148 @@ def query_latest_value(con, sql: str, key: str, params=None):
         return None
     return row.get(key)
 
+def _safe_float(value, default=0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+def _parse_list_field(raw):
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+def _fetch_json(url: str, params=None, timeout: int = 8):
+    try:
+        full_url = f"{url}?{urlencode(params)}" if params else url
+        req = Request(
+            full_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; polybot/1.0)",
+                "Accept": "application/json",
+            },
+        )
+        with urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+def _iso_to_ts(iso: str) -> str:
+    if not iso:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%dT%H:%M")
+    except Exception:
+        return str(iso)[:16]
+
+def get_live_btc_markets():
+    now = time.time()
+    cached = LIVE_CACHE["markets"]
+    if now - float(cached["ts"]) < 10:
+        return cached["data"]
+
+    payload = _fetch_json(
+        f"{GAMMA_API}/markets",
+        params={
+            "active": "true",
+            "closed": "false",
+            "limit": 2000,
+            "_order": "volume",
+        },
+        timeout=10,
+    )
+    markets_out = []
+    if isinstance(payload, list):
+        for m in payload:
+            q = str(m.get("question", "") or "")
+            q_lower = q.lower()
+            if "bitcoin" not in q_lower and "btc" not in q_lower:
+                continue
+            if not m.get("active"):
+                continue
+
+            outcomes = [str(x).strip().lower() for x in _parse_list_field(m.get("outcomes"))]
+            outcome_prices = _parse_list_field(m.get("outcomePrices"))
+            yes_idx = outcomes.index("yes") if "yes" in outcomes else 0
+            no_idx = outcomes.index("no") if "no" in outcomes else (1 if yes_idx == 0 else 0)
+            if not outcome_prices:
+                outcome_prices = [0.5, 0.5]
+            yes_idx = max(0, min(yes_idx, len(outcome_prices) - 1))
+            no_idx = max(0, min(no_idx, len(outcome_prices) - 1))
+            yes_price = _safe_float(outcome_prices[yes_idx], 0.5)
+            no_price = _safe_float(outcome_prices[no_idx], 0.5)
+
+            best_bid = _safe_float(m.get("bestBid"), 0.0)
+            best_ask = _safe_float(m.get("bestAsk"), 0.0)
+            mid = ((best_bid + best_ask) / 2.0) if best_bid > 0 and best_ask > 0 else yes_price
+            spread = (best_ask - best_bid) if best_bid > 0 and best_ask > 0 else 0.0
+
+            one_day_change = _safe_float(m.get("oneDayPriceChange"), 0.0)
+            if abs(one_day_change) <= 1.5:
+                one_day_change *= 100.0
+
+            events = m.get("events") if isinstance(m.get("events"), list) else []
+            event_slug = ""
+            if events:
+                event_slug = str(events[0].get("slug", "") or "").strip()
+            market_slug = str(m.get("slug", "") or "").strip()
+
+            markets_out.append({
+                "ts": _iso_to_ts(m.get("updatedAt") or m.get("endDate")),
+                "question": q,
+                "market_slug": market_slug,
+                "event_slug": event_slug,
+                "market_url": market_url_from_slugs(market_slug, event_slug),
+                "yes_price": max(0.0, min(1.0, yes_price)),
+                "no_price": max(0.0, min(1.0, no_price)),
+                "mid_price": max(0.0, min(1.0, mid)),
+                "best_bid": max(0.0, min(1.0, best_bid)),
+                "best_ask": max(0.0, min(1.0, best_ask)),
+                "spread": max(0.0, spread),
+                "one_day_change_pct": one_day_change,
+                "volume": _safe_float(m.get("volume"), 0.0),
+                "liquidity": _safe_float(m.get("liquidity"), 0.0),
+            })
+    markets_out.sort(key=lambda x: x["volume"], reverse=True)
+    LIVE_CACHE["markets"] = {"ts": now, "data": markets_out}
+    return markets_out
+
+def get_live_btc_history():
+    now = time.time()
+    cached = LIVE_CACHE["btc_history"]
+    if now - float(cached["ts"]) < 15:
+        return cached["data"]
+
+    payload = _fetch_json(
+        f"{BINANCE_API}/api/v3/klines",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "5m",
+            "limit": 288,
+        },
+        timeout=10,
+    )
+    out = []
+    if isinstance(payload, list):
+        for row in payload:
+            if not isinstance(row, list) or len(row) < 5:
+                continue
+            ts_ms = int(_safe_float(row[0], 0.0))
+            dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+            out.append({
+                "ts": dt.strftime("%Y-%m-%dT%H:%M"),
+                "price": _safe_float(row[4], 0.0),
+            })
+    LIVE_CACHE["btc_history"] = {"ts": now, "data": out}
+    return out
+
 def resolve_event_slug(market_slug: str) -> str:
     """
     Resolve market slug -> event slug via Gamma API.
@@ -224,230 +374,135 @@ def resolve_event_slug(market_slug: str) -> str:
 
 @app.route("/api/summary")
 def summary():
-    con = get_db()
-    paper_initial_balance = float(os.getenv("POLY_PAPER_INITIAL_BALANCE", "500"))
-    total_trades = query_value(con, SQL_COUNT_TRADES, "cnt", default=0)
-    realized_pnl = query_value(
-        con,
-        SQL_SUM_FILLED_PNL,
-        "pnl",
-        default=0.0,
-    )
-    total_volume = query_value(
-        con,
-        SQL_SUM_TRADE_VOLUME,
-        "volume",
-        default=0.0,
-    )
-    open_t = query_value(
-        con,
-        SQL_COUNT_OPEN_ORDERS,
-        "cnt",
-        default=0,
-    )
-    latest_balance = query_latest_value(
-        con,
-        SQL_LATEST_BALANCE,
-        "balance",
-    )
-    equity = float(latest_balance) if latest_balance is not None else (paper_initial_balance + realized_pnl)
-    roi_pct = ((equity - paper_initial_balance) / paper_initial_balance * 100.0) if paper_initial_balance > 0 else 0.0
+    markets = get_live_btc_markets()
+    btc_hist = get_live_btc_history()
+    btc_price = btc_hist[-1]["price"] if btc_hist else 0.0
 
-    btc_price = query_latest_value(con, SQL_LATEST_BTC_PRICE, "price")
-    runtime = con.execute(SQL_RUNTIME_SUMMARY).fetchone()
-
-    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
-    markets_active = query_value(
-        con,
-        SQL_ACTIVE_MARKETS_LAST_HOUR,
-        "active_markets",
-        params=(one_hour_ago,),
-        default=0,
-    )
-
-    one_day_ago = datetime.now(timezone.utc) - timedelta(days=1)
-    daily_pnl = query_value(
-        con,
-        SQL_DAILY_PNL,
-        "pnl",
-        params=(one_day_ago,),
-        default=0.0,
-    )
-    win_trades = query_value(
-        con,
-        SQL_COUNT_WIN_TRADES,
-        "cnt",
-        default=0,
-    )
-    total_filled = query_value(
-        con,
-        SQL_COUNT_FILLED_TRADES,
-        "cnt",
-        default=0,
-    )
-    win_rate = round((win_trades / total_filled * 100), 1) if total_filled > 0 else 0.0
+    active_markets = len(markets)
+    total_volume = sum(m["volume"] for m in markets)
+    avg_yes = (sum(m["yes_price"] for m in markets) / active_markets) if active_markets else 0.0
+    weighted_yes = (sum(m["yes_price"] * m["volume"] for m in markets) / total_volume) if total_volume > 0 else avg_yes
+    yes_ge_50 = (sum(1 for m in markets if m["yes_price"] >= 0.5) / active_markets * 100.0) if active_markets else 0.0
+    top = markets[0] if markets else None
 
     return jsonify({
-        "total_trades":    total_trades,
-        "realized_pnl":    round(realized_pnl, 2),
-        "total_volume":    round(total_volume, 2),
-        "open_orders":     open_t,
-        "btc_price":       float(runtime["btc_price"]) if runtime and runtime["btc_price"] else (btc_price or 0),
-        "btc_source":      str(runtime["btc_source"] or "ref") if runtime else "ref",
-        "ws_connected":    bool(runtime["ws_connected"]) if runtime else False,
-        "ws_tick_age_sec": (None if not runtime or runtime["ws_tick_age_sec"] is None else float(runtime["ws_tick_age_sec"])),
-        "cycle_latency_ms": float(runtime["cycle_latency_ms"] or 0.0) if runtime else 0.0,
-        "orders_placed_cycle": int(runtime["orders_placed_cycle"] or 0) if runtime else 0,
-        "cycle_latency_avg_ms": float(runtime["cycle_latency_avg_ms"] or 0.0) if runtime else 0.0,
-        "orders_placed_avg": float(runtime["orders_placed_avg"] or 0.0) if runtime else 0.0,
-        "active_markets":  markets_active,
-        "daily_pnl":       round(daily_pnl, 2),
-        "win_rate":        win_rate,
-        "kill_switch":     bool(runtime["kill_switch"]) if runtime else False,
-        "paper_mode":      bool(runtime["paper_mode"]) if runtime else True,
-        "starting_balance": round(paper_initial_balance, 2),
-        "equity":          round(equity, 2),
-        "roi_pct":         round(roi_pct, 2),
+        "active_markets": active_markets,
+        "total_market_volume": round(total_volume, 2),
+        "avg_yes_cents": round(avg_yes * 100.0, 2),
+        "weighted_yes_cents": round(weighted_yes * 100.0, 2),
+        "yes_ge_50_pct": round(yes_ge_50, 1),
+        "btc_price": round(btc_price, 2),
+        "top_market_question": top["question"] if top else "",
+        "top_market_yes_cents": round((top["yes_price"] if top else 0.0) * 100.0, 2),
+        "top_market_volume": round(top["volume"], 2) if top else 0.0,
     })
 
 @app.route("/api/status")
 def status():
-    con = get_db()
-    row = con.execute(
-        "SELECT updated_at, running, kill_switch, paper_mode, btc_price, btc_source, ws_connected, ws_tick_age_sec, cycle_latency_ms, orders_placed_cycle, cycle_latency_avg_ms, orders_placed_avg, last_cycle, errors FROM runtime_state WHERE id=1"
-    ).fetchone()
-    if not row:
-        return jsonify({
-            "running": False,
-            "healthy": False,
-            "kill_switch": False,
-            "paper_mode": True,
-            "btc_price": 0.0,
-            "btc_source": "ref",
-            "ws_connected": False,
-            "ws_tick_age_sec": None,
-            "cycle_latency_ms": 0.0,
-            "orders_placed_cycle": 0,
-            "cycle_latency_avg_ms": 0.0,
-            "orders_placed_avg": 0.0,
-            "last_cycle": "",
-            "errors": 0,
-            "updated_at": None,
-        })
-
-    updated_at = row["updated_at"]
-    healthy = False
-    if updated_at:
-        try:
-            ts = updated_at if isinstance(updated_at, datetime) else datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
-            healthy = (datetime.now(timezone.utc) - ts).total_seconds() <= 120
-        except Exception:
-            healthy = False
-
+    markets = get_live_btc_markets()
+    btc_hist = get_live_btc_history()
+    now = time.time()
+    market_age = max(0.0, now - float(LIVE_CACHE["markets"]["ts"]))
+    btc_age = max(0.0, now - float(LIVE_CACHE["btc_history"]["ts"]))
+    healthy = bool(markets) and bool(btc_hist)
     return jsonify({
-        "running": bool(row["running"]),
+        "running": True,
         "healthy": healthy,
-        "kill_switch": bool(row["kill_switch"]),
-        "paper_mode": bool(row["paper_mode"]),
-        "btc_price": float(row["btc_price"] or 0),
-        "btc_source": str(row["btc_source"] or "ref"),
-        "ws_connected": bool(row["ws_connected"]),
-        "ws_tick_age_sec": (None if row["ws_tick_age_sec"] is None else float(row["ws_tick_age_sec"])),
-        "cycle_latency_ms": float(row["cycle_latency_ms"] or 0.0),
-        "orders_placed_cycle": int(row["orders_placed_cycle"] or 0),
-        "cycle_latency_avg_ms": float(row["cycle_latency_avg_ms"] or 0.0),
-        "orders_placed_avg": float(row["orders_placed_avg"] or 0.0),
-        "last_cycle": row["last_cycle"] or "",
-        "errors": int(row["errors"] or 0),
-        "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else updated_at,
+        "paper_mode": False,
+        "source": "LIVE_MARKET",
+        "market_count": len(markets),
+        "market_age_sec": round(market_age, 1),
+        "btc_age_sec": round(btc_age, 1),
     })
 
 @app.route("/api/pnl_curve")
 def pnl_curve():
-    con = get_db()
-    rows = con.execute(SQL_PNL_CURVE).fetchall()
-    if not rows:
-        trades = con.execute(SQL_FILLED_TRADES_FOR_PNL).fetchall()
-        acc = 0.0
-        points = []
-        for t in trades:
-            acc += float(t["pnl"] or 0)
-            points.append({"ts": fmt_ts(t["ts"]), "pnl": round(acc, 4)})
-        return jsonify(points)
-
-    rows = list(reversed(rows))
-    return jsonify(timeseries(rows, "realized_pnl", "pnl"))
+    markets = get_live_btc_markets()[:20]
+    return jsonify([
+        {
+            "label": (m["question"][:22] + "…") if len(m["question"]) > 22 else m["question"],
+            "value": round(m["volume"], 2),
+        }
+        for m in markets
+    ])
 
 @app.route("/api/trades/recent")
 def recent_trades():
-    con = get_db()
-    rows = con.execute(SQL_RECENT_TRADES).fetchall()
-    out = rows_with_formatted_ts(rows)
-    for d in out:
-        event_slug = (d.get("event_slug") or "").strip()
-        market_slug = (d.get("market_slug") or "").strip()
-        if not event_slug and market_slug:
-            # Backfill for old rows that only stored market slug.
-            event_slug = resolve_event_slug(market_slug)
-            if event_slug:
-                try:
-                    con.execute(
-                        "UPDATE trades SET event_slug=%s WHERE market_slug=%s AND (event_slug IS NULL OR event_slug='')",
-                        (event_slug, market_slug),
-                    )
-                    con.commit()
-                except Exception:
-                    pass
-        d["market_url"] = market_url_from_slugs(market_slug, event_slug)
-        price = float(d.get("price") or 0.0)
-        size = float(d.get("notional_usdc") or d.get("size") or 0.0)
-        shares = float(d.get("size_shares") or 0.0)
-        if shares <= 0:
-            shares = round(size / max(price, 0.01), 2) if size > 0 else 0.0
-        pnl = float(d.get("pnl") or 0.0)
-        # Market maker currently quotes YES token, so this indicates YES share flow.
-        d["outcome"] = "YES"
-        d["price_cents"] = round(price * 100.0, 2)
-        d["contracts"] = round(shares, 2)
-        d["notional_usdc"] = round(size, 4)
-        d["return_pct"] = round((pnl / size * 100.0), 2) if size > 0 else 0.0
+    markets = get_live_btc_markets()[:75]
+    out = []
+    for m in markets:
+        out.append({
+            "ts": m["ts"],
+            "market_q": m["question"],
+            "yes_cents": round(m["yes_price"] * 100.0, 2),
+            "no_cents": round(m["no_price"] * 100.0, 2),
+            "mid_cents": round(m["mid_price"] * 100.0, 2),
+            "spread_cents": round(m["spread"] * 100.0, 2),
+            "volume_usd": round(m["volume"], 2),
+            "change_24h_pct": round(m["one_day_change_pct"], 2),
+            "market_url": m["market_url"],
+        })
     return jsonify(out)
 
 @app.route("/api/trades/markets")
 def market_breakdown():
-    con = get_db()
-    rows = con.execute(SQL_MARKET_BREAKDOWN).fetchall()
-    return jsonify([dict(r) for r in rows])
+    markets = get_live_btc_markets()[:12]
+    return jsonify([
+        {
+            "market_q": m["question"],
+            "volume": round(m["volume"], 2),
+            "yes_cents": round(m["yes_price"] * 100.0, 2),
+            "no_cents": round(m["no_price"] * 100.0, 2),
+        }
+        for m in markets
+    ])
 
 @app.route("/api/btc")
 def btc_history():
-    con = get_db()
-    rows = con.execute(SQL_BTC_HISTORY).fetchall()
-    rows = list(reversed(rows))
-    return jsonify(timeseries(rows, "price", "price"))
+    return jsonify(get_live_btc_history())
 
 @app.route("/api/quotes/recent")
 def recent_quotes():
-    con = get_db()
-    rows = con.execute(SQL_RECENT_QUOTES).fetchall()
-    return jsonify(rows_with_formatted_ts(rows))
+    markets = get_live_btc_markets()[:30]
+    return jsonify([
+        {
+            "model_type": "live",
+            "market_id": m["market_slug"] or m["event_slug"] or m["question"][:24],
+            "fair_price": m["yes_price"],
+            "bid": m["best_bid"] if m["best_bid"] > 0 else m["yes_price"],
+            "ask": m["best_ask"] if m["best_ask"] > 0 else m["no_price"],
+            "edge": m["spread"],
+            "placed": 1 if m["best_bid"] > 0 and m["best_ask"] > 0 else 0,
+        }
+        for m in markets
+    ])
 
 @app.route("/api/hourly_pnl")
 def hourly_pnl():
-    con = get_db()
-    rows = con.execute(SQL_HOURLY_PNL).fetchall()
-    return jsonify([dict(r) for r in reversed(rows)])
+    markets = get_live_btc_markets()[:24]
+    return jsonify([
+        {
+            "hour": (m["question"][:10] + "…") if len(m["question"]) > 10 else m["question"],
+            "trades": 0,
+            "pnl": round(m["one_day_change_pct"], 2),
+        }
+        for m in markets
+    ])
 
 @app.route("/api/logs")
 def get_logs():
-    log_dir = Path(__file__).parent / "logs"
-    today = datetime.now().strftime("%Y%m%d")
-    log_file = log_dir / f"bot_{today}.log"
-    lines = []
-    if log_file.exists():
-        with open(log_file, encoding="utf-8") as f:
-            lines = f.readlines()[-60:]
-    return jsonify({"lines": [l.rstrip() for l in lines]})
+    markets = get_live_btc_markets()
+    top = markets[0] if markets else None
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    lines = [
+        f"{now} [INFO] LIVE_DATA source=gamma+binance btc_markets={len(markets)}",
+    ]
+    if top:
+        lines.append(
+            f"{now} [INFO] TOP_MARKET yes={top['yes_price']*100:.2f}c "
+            f"no={top['no_price']*100:.2f}c volume=${top['volume']:.0f} q={top['question'][:80]}"
+        )
+    return jsonify({"lines": lines})
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")

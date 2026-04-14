@@ -53,6 +53,19 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS orders_placed_cycle INTEGER DEFAULT 0",
     "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS cycle_latency_avg_ms REAL DEFAULT 0",
     "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS orders_placed_avg REAL DEFAULT 0",
+    # Historical fix: normalize share count to notional/price when legacy rows were
+    # written with midpoint-derived shares (causes impossible UI values).
+    """UPDATE trades
+       SET size_shares = ROUND((COALESCE(notional_usdc, size) / GREATEST(price, 0.01))::numeric, 6)
+       WHERE price IS NOT NULL
+         AND price > 0
+         AND COALESCE(notional_usdc, size) IS NOT NULL
+         AND COALESCE(notional_usdc, size) > 0
+         AND (
+              size_shares IS NULL
+              OR size_shares <= 0
+              OR ABS((size_shares * price) - COALESCE(notional_usdc, size)) > GREATEST(0.5, COALESCE(notional_usdc, size) * 0.05)
+         )""",
 ]
 
 

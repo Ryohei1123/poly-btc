@@ -427,7 +427,7 @@
         aria-expanded="false"
       >
         ?
-        <span class="ops-legend-tip" id="ops-legend-tip">Trend markers: + improving, - worsening, = unchanged. Orders favor higher; latency favors lower.</span>
+        <span class="ops-legend-tip" id="ops-legend-tip">MKTS = live BTC market count. AGE = seconds since latest Gamma/Binance refresh.</span>
       </button>
     </div>
     <div style="font-family:var(--mono);font-size:11px;color:var(--text3)" id="last-update">—</div>
@@ -439,37 +439,37 @@
   <div class="controls">
     <button class="btn btn-green" onclick="refreshAll()">⟳ Refresh</button>
     <button class="btn btn-gray" onclick="toggleAutoRefresh()">⏱ Auto-refresh: <span id="auto-label">ON</span></button>
-    <button class="btn btn-red" onclick="alert('Kill switch would cancel all open orders and halt the bot.')">🛑 Kill Switch</button>
+    <button class="btn btn-red" onclick="alert('Actual market data only mode is enabled.')">🛑 Data-Only Mode</button>
     <div style="margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--text3);display:flex;align-items:center;gap:6px;">
-      Mode: <span style="color:var(--yellow);font-weight:600" id="mode-label">PAPER TRADING</span>
-      &nbsp;|&nbsp; Set POLY_PRIVATE_KEY for live trading
+      Mode: <span style="color:var(--green);font-weight:600" id="mode-label">LIVE MARKET DATA</span>
+      &nbsp;|&nbsp; Polymarket + Binance
     </div>
   </div>
 
   <!-- Stats -->
   <div class="stats-grid">
     <div class="stat-card" style="--accent:var(--green)">
-      <div class="stat-label">Total PnL</div>
+      <div class="stat-label">Total Market Volume</div>
       <div class="stat-value" id="stat-pnl">$—</div>
       <div class="stat-sub" id="stat-pnl-sub">Loading…</div>
       <div class="stat-icon">💰</div>
     </div>
     <div class="stat-card" style="--accent:var(--blue)">
-      <div class="stat-label">Total Trades</div>
+      <div class="stat-label">Active BTC Markets</div>
       <div class="stat-value" id="stat-trades">—</div>
       <div class="stat-sub" id="stat-trades-sub">Loading…</div>
       <div class="stat-icon">⚡</div>
     </div>
     <div class="stat-card" style="--accent:var(--yellow)">
-      <div class="stat-label">Daily PnL</div>
-      <div class="stat-value" id="stat-daily">$—</div>
-      <div class="stat-sub" id="stat-daily-sub">Last 24 hours</div>
+      <div class="stat-label">Volume-Weighted YES</div>
+      <div class="stat-value" id="stat-daily">—¢</div>
+      <div class="stat-sub" id="stat-daily-sub">Across active BTC markets</div>
       <div class="stat-icon">📅</div>
     </div>
     <div class="stat-card" style="--accent:var(--purple)">
-      <div class="stat-label">Win Rate</div>
+      <div class="stat-label">YES >= 50%</div>
       <div class="stat-value" id="stat-wr">—%</div>
-      <div class="stat-sub" id="stat-wr-sub">Profitable trades</div>
+      <div class="stat-sub" id="stat-wr-sub">Market breadth</div>
       <div class="stat-icon">🎯</div>
     </div>
   </div>
@@ -478,8 +478,8 @@
   <div class="charts-row">
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Cumulative PnL Curve</span>
-        <span class="panel-badge" id="pnl-badge">30d</span>
+        <span class="panel-title">Top BTC Market Volumes</span>
+        <span class="panel-badge" id="pnl-badge">LIVE</span>
       </div>
       <div class="panel-body">
         <div class="chart-wrap"><canvas id="pnl-chart"></canvas></div>
@@ -498,10 +498,10 @@
 
   <!-- Bottom Row -->
   <div class="bottom-row">
-    <!-- Recent Trades -->
+    <!-- Live Markets -->
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Recent Trades</span>
+        <span class="panel-title">Live Market Snapshot</span>
         <span class="panel-badge" id="trades-badge">—</span>
       </div>
       <div class="panel-body" style="padding:0">
@@ -511,12 +511,12 @@
               <tr>
                 <th>Time</th>
                 <th>Market</th>
-                <th>Outcome</th>
-                <th>Side</th>
-                <th>Entry</th>
-                <th>Contracts</th>
-                <th>Size</th>
-                <th>PnL</th>
+                <th>YES</th>
+                <th>NO</th>
+                <th>MID</th>
+                <th>Spread</th>
+                <th>Volume</th>
+                <th>24h</th>
                 <th>Market URL</th>
               </tr>
             </thead>
@@ -528,10 +528,10 @@
       </div>
     </div>
 
-    <!-- Market Breakdown -->
+    <!-- Market Volume Breakdown -->
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Markets PnL Breakdown</span>
+        <span class="panel-title">Market Volume Breakdown</span>
       </div>
       <div class="panel-body">
         <div id="markets-breakdown">
@@ -542,18 +542,18 @@
       </div>
     </div>
 
-    <!-- Hourly bar + win ring -->
+    <!-- 24h change + breadth ring -->
     <div style="display:flex;flex-direction:column;gap:14px;">
       <div class="panel" style="flex:1">
         <div class="panel-header">
-          <span class="panel-title">Hourly PnL (48h)</span>
+          <span class="panel-title">24h Change by Market (%)</span>
         </div>
         <div class="panel-body">
           <div class="chart-wrap" style="height:160px"><canvas id="hourly-chart"></canvas></div>
         </div>
       </div>
       <div class="panel">
-        <div class="panel-header"><span class="panel-title">Win Rate</span></div>
+        <div class="panel-header"><span class="panel-title">YES >= 50% Breadth</span></div>
         <div class="panel-body" style="display:flex;justify-content:center;padding:12px">
           <div class="ring-wrap">
             <svg class="ring" width="90" height="90" viewBox="0 0 90 90">
@@ -564,31 +564,31 @@
                 stroke-linecap="round" style="transition:stroke-dashoffset 1s"/>
             </svg>
             <div class="ring-text" id="ring-pct">—%</div>
-            <div class="ring-sub">win rate</div>
+            <div class="ring-sub">breadth</div>
           </div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Live Log -->
+  <!-- Data Feed Log -->
   <div class="panel-header" style="background:var(--bg2);border:1px solid var(--border);border-radius:12px 12px 0 0;border-bottom:none;margin-bottom:0">
-    <span class="panel-title">Live Log</span>
+    <span class="panel-title">Data Feed Log</span>
     <span class="panel-badge">TAIL</span>
   </div>
   <div class="log-terminal" id="log-output" style="border-radius:0 0 12px 12px;margin-bottom:20px">
     <div class="log-line">Waiting for bot data…</div>
   </div>
 
-  <!-- Recent Quotes -->
+  <!-- Live Quotes -->
   <div class="panel">
     <div class="panel-header">
-      <span class="panel-title">Recent Quotes</span>
+      <span class="panel-title">Live Quotes</span>
       <span class="panel-badge">CLOB</span>
     </div>
     <div class="panel-body" style="padding:0 16px">
       <div class="quote-row" style="font-size:10px;color:var(--text3);font-family:var(--mono);border-bottom:1px solid var(--border);padding:6px 0">
-        <span>MODEL</span><span>MARKET</span><span>FAIR</span><span>BID/ASK</span><span>EDGE</span><span>PLACED</span>
+        <span>SRC</span><span>MARKET</span><span>YES</span><span>BID/ASK</span><span>SPREAD</span><span>BOOK</span>
       </div>
       <div id="quotes-body">
         <div class="shimmer" style="margin:8px 0"></div>
@@ -712,11 +712,11 @@ function initHourlyChart(labels, values) {
       responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false }, tooltip: {
         backgroundColor:'#0d1420', borderColor:'#1d2d45', borderWidth:1,
-        callbacks: { label: ctx => ' $' + ctx.raw.toFixed(2) }
+        callbacks: { label: ctx => ' ' + ctx.raw.toFixed(2) + '%' }
       }},
       scales: {
         x: { ticks: { color:'#3d5270', maxTicksLimit:6, font:{family:'JetBrains Mono',size:9} }, grid: { color:'#1d2d45' } },
-        y: { ticks: { color:'#3d5270', font:{family:'JetBrains Mono',size:9} }, grid: { color:'#1d2d45' } }
+        y: { ticks: { color:'#3d5270', font:{family:'JetBrains Mono',size:9}, callback: v => v + '%' }, grid: { color:'#1d2d45' } }
       }
     }
   });
@@ -770,65 +770,47 @@ async function loadStatus() {
   const dot = statusPill.querySelector('.dot');
   const wsDot = wsPill.querySelector('.dot');
 
-  modeLabel.textContent = d.paper_mode ? 'PAPER TRADING' : 'LIVE TRADING';
-  modeLabel.style.color = d.paper_mode ? 'var(--yellow)' : 'var(--green)';
+  modeLabel.textContent = 'LIVE MARKET DATA';
+  modeLabel.style.color = 'var(--green)';
 
   if (!d.running || !d.healthy) {
-    applyPillTheme(statusPill, dot, statusText, 'IDLE', 'yellow');
-  } else if (d.kill_switch) {
-    applyPillTheme(statusPill, dot, statusText, 'KILL', 'red');
+    applyPillTheme(statusPill, dot, statusText, 'DEGRADED', 'yellow');
   } else {
     applyPillTheme(statusPill, dot, statusText, 'LIVE', 'green');
   }
 
-  const wsConnected = Boolean(d.ws_connected);
-  const wsAge = (d.ws_tick_age_sec == null) ? null : Number(d.ws_tick_age_sec);
-  const source = (d.btc_source || 'ref').toUpperCase();
-  if (wsConnected && wsAge !== null && wsAge <= 15) {
-    applyPillTheme(wsPill, wsDot, wsText, `WS ${source} ${wsAge.toFixed(1)}s`, 'blue');
-  } else {
-    applyPillTheme(wsPill, wsDot, wsText, `WS OFF ${source}`, 'yellow');
-  }
-
-  const ordersPlaced = Number(d.orders_placed_cycle || 0);
-  const latencyMs = Number(d.cycle_latency_ms || 0);
-  const ordersAvg = Number(d.orders_placed_avg || 0);
-  const latencyAvgMs = Number(d.cycle_latency_avg_ms || 0);
-  const ordersTrend = trendMarker(ordersPlaced, prevOrdersPlaced, false);
-  const latencyTrend = trendMarker(latencyMs, prevLatencyMs, true);
-  opsText.textContent = `ORD ${ordersPlaced}/${ordersAvg.toFixed(1)}${ordersTrend} | LAT ${latencyMs.toFixed(0)}/${latencyAvgMs.toFixed(0)}ms${latencyTrend}`;
-  prevOrdersPlaced = ordersPlaced;
-  prevLatencyMs = latencyMs;
+  applyPillTheme(wsPill, wsDot, wsText, 'GAMMA + BINANCE', 'blue');
+  const marketAge = Number(d.market_age_sec || 0);
+  const btcAge = Number(d.btc_age_sec || 0);
+  opsText.textContent = `MKTS ${Number(d.market_count || 0)} | AGE MKT ${marketAge.toFixed(1)}s / BTC ${btcAge.toFixed(1)}s`;
 }
 
 async function loadSummary() {
   const d = await fetchJSON('/api/summary');
-  const realizedPnl = Number(d.realized_pnl || 0);
-  const dailyPnl = Number(d.daily_pnl || 0);
-  const winRate = Number(d.win_rate || 0);
+  const totalVolume = Number(d.total_market_volume || 0);
+  const weightedYesCents = Number(d.weighted_yes_cents || 0);
+  const breadthPct = Number(d.yes_ge_50_pct || 0);
   const btcPrice = Number(d.btc_price || 0);
-  const totalTrades = Number(d.total_trades || 0);
-  const openOrders = Number(d.open_orders || 0);
   const activeMarkets = Number(d.active_markets || 0);
-  const equity = Number(d.equity || 0);
-  const roiPct = Number(d.roi_pct || 0);
-  const startingBalance = Number(d.starting_balance || 0);
+  const topMarket = d.top_market_question || '—';
+  const topYesCents = Number(d.top_market_yes_cents || 0);
+  const topVolume = Number(d.top_market_volume || 0);
 
-  el('stat-pnl').textContent = fmtPnl(realizedPnl);
-  el('stat-pnl').style.color = realizedPnl >= 0 ? 'var(--green)' : 'var(--red)';
-  el('stat-pnl-sub').textContent = `Equity: $${fmtNum(equity, 2)} | ROI: ${roiPct.toFixed(2)}%`;
-  el('stat-trades').textContent = totalTrades.toLocaleString();
-  el('stat-trades-sub').textContent = `${openOrders} open orders | Start: $${startingBalance.toFixed(0)}`;
-  el('stat-daily').textContent = fmtPnl(dailyPnl);
-  el('stat-daily').style.color = dailyPnl >= 0 ? 'var(--green)' : 'var(--red)';
-  el('stat-wr').textContent = winRate + '%';
-  el('stat-wr-sub').textContent = `${activeMarkets} active markets`;
+  el('stat-pnl').textContent = '$' + fmtNum(totalVolume, 0);
+  el('stat-pnl').style.color = 'var(--green)';
+  el('stat-pnl-sub').textContent = `Top: ${truncate(topMarket, 26)} (${topYesCents.toFixed(1)}¢, $${fmtNum(topVolume, 0)})`;
+  el('stat-trades').textContent = activeMarkets.toLocaleString();
+  el('stat-trades-sub').textContent = `Avg YES: ${Number(d.avg_yes_cents || 0).toFixed(1)}¢`;
+  el('stat-daily').textContent = weightedYesCents.toFixed(1) + '¢';
+  el('stat-daily').style.color = 'var(--yellow)';
+  el('stat-wr').textContent = breadthPct.toFixed(1) + '%';
+  el('stat-wr-sub').textContent = `${activeMarkets} active BTC markets`;
   el('btc-badge').textContent = 'BTC $' + fmtNum(btcPrice, 0);
   el('btc-badge2').textContent = '$' + fmtNum(btcPrice, 0);
-  el('trades-badge').textContent = totalTrades + ' total';
+  el('trades-badge').textContent = activeMarkets + ' live';
 
   // Ring
-  const pct = winRate;
+  const pct = breadthPct;
   el('ring-pct').textContent = pct + '%';
   const circ = 2 * Math.PI * 36;
   el('ring-circle').setAttribute('stroke-dashoffset', circ * (1 - pct/100));
@@ -838,15 +820,15 @@ async function loadPnlCurve() {
   const data = await fetchJSON('/api/pnl_curve');
   if (!data.length) {
     if (pnlChart) updateChart(pnlChart, [], []);
-    el('pnl-badge').textContent = '$0';
+    el('pnl-badge').textContent = 'LIVE';
     return;
   }
-  const labels = data.map(d => d.ts.slice(5,16));
-  const values = data.map(d => d.pnl);
+  const labels = data.map(d => truncate(d.label || '—', 10));
+  const values = data.map(d => +(d.value || 0));
   if (!pnlChart) initPnlChart(labels, values);
   else updateChart(pnlChart, labels, values);
-  const last = values[values.length-1];
-  el('pnl-badge').textContent = '$' + fmtNum(last || 0, 0);
+  const total = values.reduce((a, b) => a + b, 0);
+  el('pnl-badge').textContent = '$' + fmtNum(total || 0, 0);
 }
 
 async function loadBtc() {
@@ -861,7 +843,7 @@ async function loadTrades() {
   const data = await fetchJSON('/api/trades/recent');
   const tbody = el('trades-body');
   if (!data.length) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">No trades yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">No live markets found</td></tr>';
     return;
   }
   tbody.innerHTML = data.map(t => `
@@ -869,14 +851,14 @@ async function loadTrades() {
       <td>${fmtTime(t.ts)}</td>
       <td title="${t.market_q||''}">
         ${truncate(t.market_q||'—', 28)}
-        <div style="color:var(--text3);font-size:10px;margin-top:2px">${fmtNum(+t.contracts, 2)} ${t.outcome || 'YES'} @ ${(+(t.price_cents || 0)).toFixed(2)}c</div>
+        <div style="color:var(--text3);font-size:10px;margin-top:2px">Vol $${fmtNum(+t.volume_usd, 0)}</div>
       </td>
-      <td style="color:var(--yellow)">${t.outcome || 'YES'}</td>
-      <td class="side-${t.side.toLowerCase()}">${t.side}</td>
-      <td>${(+(t.price_cents || 0)).toFixed(2)}c</td>
-      <td>${fmtNum(+t.contracts, 2)}</td>
-      <td>$${(+(t.notional_usdc || t.size || 0)).toFixed(0)}</td>
-      <td class="${(+t.pnl)>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(+t.pnl)} <span style="font-size:10px;opacity:0.8">(${(+t.return_pct).toFixed(2)}%)</span></td>
+      <td style="color:var(--yellow)">${(+t.yes_cents).toFixed(2)}c</td>
+      <td style="color:var(--blue)">${(+t.no_cents).toFixed(2)}c</td>
+      <td>${(+t.mid_cents).toFixed(2)}c</td>
+      <td>${(+t.spread_cents).toFixed(2)}c</td>
+      <td>$${fmtNum(+t.volume_usd, 0)}</td>
+      <td class="${(+t.change_24h_pct)>=0?'pnl-pos':'pnl-neg'}">${(+t.change_24h_pct).toFixed(2)}%</td>
       <td>${
         t.market_url
           ? `<a href="${t.market_url}" target="_blank" rel="noopener noreferrer" style="color:var(--green);text-decoration:none">${truncate(t.market_url.replace('https://',''), 34)}</a>`
@@ -890,24 +872,24 @@ async function loadMarkets() {
   const data = await fetchJSON('/api/trades/markets');
   if (!data.length) {
     el('markets-breakdown').innerHTML =
-      '<div style="color:var(--text3);font-family:var(--mono);font-size:11px">No filled trades yet</div>';
+      '<div style="color:var(--text3);font-family:var(--mono);font-size:11px">No live market data</div>';
     return;
   }
-  const maxPnl = Math.max(...data.map(d => Math.abs(+d.total_pnl)));
+  const maxVolume = Math.max(...data.map(d => Math.abs(+d.volume)));
   el('markets-breakdown').innerHTML = data.slice(0,6).map(m => `
     <div class="market-item">
       <div class="market-label" title="${m.market_q||''}">${truncate(m.market_q||'—', 22)}</div>
       <div class="market-bar-wrap">
-        <div class="market-bar" style="width:${(Math.abs(+m.total_pnl)/maxPnl*100).toFixed(1)}%;background:${(+m.total_pnl)>=0?'var(--green)':'var(--red)'}"></div>
+        <div class="market-bar" style="width:${(Math.abs(+m.volume)/maxVolume*100).toFixed(1)}%;background:var(--green)"></div>
       </div>
-      <div class="market-pnl" style="color:${(+m.total_pnl)>=0?'var(--green)':'var(--red)'}">${fmtPnl(+m.total_pnl)}</div>
+      <div class="market-pnl" style="color:var(--green)">$${fmtNum(+m.volume, 0)}</div>
     </div>
   `).join('');
 }
 
 async function loadHourly() {
   const data = await fetchJSON('/api/hourly_pnl');
-  const labels = data.map(d => d.hour.slice(11,16));
+  const labels = data.map(d => d.hour || '—');
   const values = data.map(d => +(+d.pnl).toFixed(2));
   if (!hourlyChart) initHourlyChart(labels, values);
   else updateChart(hourlyChart, labels, values);
@@ -916,8 +898,8 @@ async function loadHourly() {
 async function loadQuotes() {
   const data = await fetchJSON('/api/quotes/recent');
   const modelLabel = (m) => {
-    if (m === 'comparative_5050') return 'comparative';
-    return m || 'terminal';
+    if (m === 'live') return 'live';
+    return m || 'live';
   };
   el('quotes-body').innerHTML = data.map(q => `
     <div class="quote-row">
@@ -940,16 +922,16 @@ async function loadLogs() {
         let cls = 'log-line';
         if (line.includes('ERROR') || line.includes('CRIT')) cls += ' error';
         else if (line.includes('WARNING') || line.includes('WARN')) cls += ' warning';
-        else if (line.includes('BUY') || line.includes('SELL') || line.includes('PAPER') || line.includes('LIVE')) cls += ' trade';
+        else if (line.includes('LIVE_DATA') || line.includes('TOP_MARKET')) cls += ' trade';
         else cls += ' info';
         return `<div class="${cls}">${line}</div>`;
       }).join('');
       logEl.scrollTop = logEl.scrollHeight;
     }
   } catch(e) {
-    // Log file not found yet — show placeholder
+    // Feed not available yet — show placeholder
     el('log-output').innerHTML =
-      '<div class="log-line info">Bot not started yet. Run: python market_maker.py</div>';
+      '<div class="log-line info">Live data feed not available yet.</div>';
   }
 }
 

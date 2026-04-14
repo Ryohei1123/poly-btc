@@ -476,6 +476,8 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
         # 2) modern "clobTokenIds" + "outcomes"/"outcomePrices"
         yes_token = ""
         no_token = ""
+        yes_idx = 0
+        no_idx = 1
         tokens = m.get("tokens", [])
         if tokens and len(tokens) >= 2:
             yes_tok = next((t for t in tokens if t.get("outcome", "").lower() == "yes"), tokens[0])
@@ -483,7 +485,17 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
             yes_token = yes_tok.get("token_id", "")
             no_token = no_tok.get("token_id", "")
         else:
-            clob_ids = m.get("clobTokenIds") or []
+            clob_ids_raw = m.get("clobTokenIds")
+            clob_ids = []
+            if isinstance(clob_ids_raw, list):
+                clob_ids = [str(x) for x in clob_ids_raw]
+            elif isinstance(clob_ids_raw, str):
+                try:
+                    parsed_clob_ids = json.loads(clob_ids_raw)
+                    if isinstance(parsed_clob_ids, list):
+                        clob_ids = [str(x) for x in parsed_clob_ids]
+                except Exception:
+                    clob_ids = []
             outcomes_raw = m.get("outcomes")
             outcomes = []
             if isinstance(outcomes_raw, list):
@@ -494,9 +506,18 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
                 except Exception:
                     outcomes = []
 
+            if "yes" in outcomes:
+                yes_idx = outcomes.index("yes")
+            if "no" in outcomes:
+                no_idx = outcomes.index("no")
+            elif yes_idx == 0:
+                no_idx = 1
+            else:
+                no_idx = 0
+
             if len(clob_ids) >= 2:
-                yes_idx = outcomes.index("yes") if "yes" in outcomes else 0
-                no_idx = outcomes.index("no") if "no" in outcomes else (1 if yes_idx == 0 else 0)
+                yes_idx = max(0, min(yes_idx, len(clob_ids) - 1))
+                no_idx = max(0, min(no_idx, len(clob_ids) - 1))
                 yes_token = str(clob_ids[yes_idx])
                 no_token = str(clob_ids[no_idx])
 
@@ -511,8 +532,10 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
             except Exception:
                 outcome_prices = ["0.5", "0.5"]
         try:
-            yes_price = float(outcome_prices[0])
-            no_price  = float(outcome_prices[1])
+            yes_idx_price = max(0, min(yes_idx, len(outcome_prices) - 1))
+            no_idx_price = max(0, min(no_idx, len(outcome_prices) - 1))
+            yes_price = float(outcome_prices[yes_idx_price])
+            no_price  = float(outcome_prices[no_idx_price])
         except (IndexError, ValueError):
             yes_price, no_price = 0.5, 0.5
 
@@ -911,8 +934,9 @@ async def place_order(
 
     order_id = f"sim_{int(time.time()*1000)}_{side[:1]}"
     notional_usdc = float(size)
-    reference_price = mid if mid is not None else price
-    size_shares = notional_to_shares(notional_usdc, reference_price)
+    # Shares must always be derived from the order price so notional, shares,
+    # and displayed cents remain arithmetically consistent in logs/UI.
+    size_shares = notional_to_shares(notional_usdc, price)
     if size_shares < config.MIN_ORDER_SHARES:
         log.debug(
             f"Skip tiny order size_shares={size_shares:.6f} below minimum {config.MIN_ORDER_SHARES:.6f}"
@@ -982,8 +1006,18 @@ async def place_order(
 
     if paper_mode:
         ref_mid = mid if mid is not None else market.yes_price
-        dist = (ref_mid - price) if side == "BUY" else (price - ref_mid)
-        fill_prob = clamp(config.PAPER_FILL_BASE + (edge * 5.0) - (max(0.0, dist) * 1.8), 0.05, 0.90)
+        # Paper fills should be strongly tied to proximity to current midpoint.
+        # This avoids unrealistic fills far from market (e.g., 4c when mid is ~49c).
+        distance_to_mid = abs(price - ref_mid)
+        marketable = (
+            (side == "BUY" and price >= ref_mid) or
+            (side == "SELL" and price <= ref_mid)
+        )
+        proximity = math.exp(-distance_to_mid * 18.0)
+        fill_prob = 0.02 + 0.35 * proximity
+        if marketable:
+            fill_prob = max(fill_prob, 0.75)
+        fill_prob = clamp(fill_prob, 0.01, 0.90)
         is_filled = random.random() < fill_prob
 
         status = "filled" if is_filled else "cancelled"
