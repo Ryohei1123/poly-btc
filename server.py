@@ -38,10 +38,20 @@ def env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_any_nonempty(*keys: str) -> bool:
+    return any((os.getenv(k) or "").strip() for k in keys)
+
+
 def _live_credentials_configured() -> bool:
-    return all(
-        (os.getenv(k) or "").strip()
-        for k in ("POLY_PRIVATE_KEY", "POLY_API_KEY", "POLY_API_SECRET", "POLY_PASSPHRASE")
+    pk_ok = _env_any_nonempty("POLY_PRIVATE_KEY", "POLYMARKET_PRIVATE_KEY")
+    if not pk_ok:
+        return False
+    if env_bool("POLY_CLOB_AUTO_DERIVE_API_CREDS", True):
+        return True
+    return (
+        _env_any_nonempty("POLY_API_KEY", "POLYMARKET_API_KEY")
+        and _env_any_nonempty("POLY_API_SECRET", "POLYMARKET_API_SECRET")
+        and _env_any_nonempty("POLY_PASSPHRASE", "POLYMARKET_API_PASSPHRASE", "POLYMARKET_PASSPHRASE")
     )
 
 
@@ -262,6 +272,131 @@ def dashboard_uses_bot_db(con) -> bool:
     if mode == "db":
         return True
     return _db_has_recent_bot_activity(con)
+
+
+def _env_credential_any(*keys: str) -> str:
+    for k in keys:
+        v = (os.getenv(k) or "").strip()
+        if v:
+            return v
+    return ""
+
+
+def _dash_normalize_private_key(raw: str) -> str:
+    s = (raw or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        s = s[1:-1].strip()
+    for ch in ("\ufeff", "\u200b", "\u200c", "\u200d"):
+        s = s.replace(ch, "")
+    return s.strip()
+
+
+def _clob_raw_balance_to_usdc(raw) -> float:
+    """CLOB returns collateral balance as integer micro-USDC (6 dp) or a decimal string."""
+    if raw is None:
+        return 0.0
+    s = str(raw).strip()
+    if not s:
+        return 0.0
+    if "." in s or "e" in s.lower():
+        return float(s)
+    return int(s) / 1e6
+
+
+_CLOB_BAL_CACHE: dict = {"ts": 0.0, "bal": None, "err": None}
+_CLOB_BAL_TTL_SEC = 15.0
+
+
+def _fetch_clob_collateral_usdc_fresh() -> tuple[Optional[float], Optional[str]]:
+    try:
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds, AssetType, BalanceAllowanceParams
+        from py_clob_client.constants import POLYGON
+    except ImportError:
+        return None, "py-clob-client not installed on this host"
+
+    pk = _dash_normalize_private_key(
+        _env_credential_any("POLY_PRIVATE_KEY", "POLYMARKET_PRIVATE_KEY")
+    )
+    if not pk:
+        return None, None
+
+    host = (os.getenv("POLY_CLOB_API") or "https://clob.polymarket.com").strip().rstrip("/")
+    sig_type_str = (os.getenv("POLY_CLOB_SIGNATURE_TYPE") or "").strip()
+    signature_type = None
+    if sig_type_str:
+        try:
+            signature_type = int(sig_type_str)
+        except ValueError:
+            return None, "invalid POLY_CLOB_SIGNATURE_TYPE (expected integer)"
+
+    funder = (os.getenv("POLY_CLOB_FUNDER") or "").strip() or None
+    auto_derive = env_bool("POLY_CLOB_AUTO_DERIVE_API_CREDS", True)
+
+    try:
+        if auto_derive:
+            client = ClobClient(
+                host=host,
+                chain_id=POLYGON,
+                key=pk,
+                creds=None,
+                signature_type=signature_type,
+                funder=funder,
+            )
+            creds = client.create_or_derive_api_creds()
+            if creds is None:
+                creds = client.derive_api_key()
+            if creds is None:
+                return None, "CLOB API creds derive failed (None)"
+            client.set_api_creds(creds)
+        else:
+            api_key = _env_credential_any("POLY_API_KEY", "POLYMARKET_API_KEY")
+            api_secret = _env_credential_any("POLY_API_SECRET", "POLYMARKET_API_SECRET")
+            api_pass = _env_credential_any(
+                "POLY_PASSPHRASE", "POLYMARKET_API_PASSPHRASE", "POLYMARKET_PASSPHRASE"
+            )
+            if not api_key or not api_secret or not api_pass:
+                return None, None
+            client = ClobClient(
+                host=host,
+                chain_id=POLYGON,
+                key=pk,
+                creds=ApiCreds(
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    api_passphrase=api_pass,
+                ),
+                signature_type=signature_type,
+                funder=funder,
+            )
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=-1)
+        data = client.get_balance_allowance(params)
+    except Exception as e:
+        return None, str(e)[:240]
+
+    if not isinstance(data, dict):
+        return None, "unexpected CLOB balance response"
+    bal = _clob_raw_balance_to_usdc(data.get("balance"))
+    return round(bal, 6), None
+
+
+def _cached_clob_usdc_balance() -> tuple[Optional[float], Optional[str]]:
+    global _CLOB_BAL_CACHE
+    if not _live_credentials_configured():
+        return None, None
+    now = time.time()
+    if (now - float(_CLOB_BAL_CACHE["ts"])) < _CLOB_BAL_TTL_SEC:
+        return _CLOB_BAL_CACHE["bal"], _CLOB_BAL_CACHE["err"]
+    bal, err = _fetch_clob_collateral_usdc_fresh()
+    _CLOB_BAL_CACHE = {"ts": now, "bal": bal, "err": err}
+    return bal, err
+
+
+def _merge_clob_balance_into(payload: dict) -> dict:
+    bal, err = _cached_clob_usdc_balance()
+    payload["clob_collateral_usdc"] = bal
+    payload["clob_collateral_usdc_error"] = err
+    return payload
 
 
 def _wrap_rows(rows: list, source: str) -> dict:
@@ -622,7 +757,7 @@ def summary():
         use_db = False
 
     if use_db and con is not None:
-        return jsonify(_summary_from_db(con, markets, btc_price))
+        return jsonify(_merge_clob_balance_into(_summary_from_db(con, markets, btc_price)))
 
     active_markets = len(markets)
     total_volume = sum(m["volume"] for m in markets)
@@ -631,18 +766,22 @@ def summary():
     yes_ge_50 = (sum(1 for m in markets if m["yes_price"] >= 0.5) / active_markets * 100.0) if active_markets else 0.0
     top = markets[0] if markets else None
 
-    return jsonify({
-        "dashboard_data_source": "gamma",
-        "active_markets": active_markets,
-        "total_market_volume": round(total_volume, 2),
-        "avg_yes_cents": round(avg_yes * 100.0, 2),
-        "weighted_yes_cents": round(weighted_yes * 100.0, 2),
-        "yes_ge_50_pct": round(yes_ge_50, 1),
-        "btc_price": round(btc_price, 2),
-        "top_market_question": top["question"] if top else "",
-        "top_market_yes_cents": round((top["yes_price"] if top else 0.0) * 100.0, 2),
-        "top_market_volume": round(top["volume"], 2) if top else 0.0,
-    })
+    return jsonify(
+        _merge_clob_balance_into(
+            {
+                "dashboard_data_source": "gamma",
+                "active_markets": active_markets,
+                "total_market_volume": round(total_volume, 2),
+                "avg_yes_cents": round(avg_yes * 100.0, 2),
+                "weighted_yes_cents": round(weighted_yes * 100.0, 2),
+                "yes_ge_50_pct": round(yes_ge_50, 1),
+                "btc_price": round(btc_price, 2),
+                "top_market_question": top["question"] if top else "",
+                "top_market_yes_cents": round((top["yes_price"] if top else 0.0) * 100.0, 2),
+                "top_market_volume": round(top["volume"], 2) if top else 0.0,
+            }
+        )
+    )
 
 @app.route("/api/status")
 def status():

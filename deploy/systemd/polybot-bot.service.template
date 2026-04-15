@@ -6,9 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=__WORKDIR__
-# Do not use empty KEY= lines here — systemd exports them and they block values from poly-btc/.env.
-# market_maker.py loads __WORKDIR__/.env with override=True; you may omit EnvironmentFile if redundant.
-EnvironmentFile=__WORKDIR__/.env
+# Secrets: market_maker.py loads __WORKDIR__/.env itself (override=True). No EnvironmentFile — systemd
+# would pre-export empty KEY= lines from the same file and block the app from fixing them.
 ExecStart=__PYTHON__ __WORKDIR__/market_maker.py
 Restart=always
 RestartSec=5

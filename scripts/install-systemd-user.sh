@@ -47,6 +47,7 @@ systemctl --user enable --now polybot-dashboard.service
 
 echo ""
 echo "Services installed and started."
+echo "Note: units do not use systemd EnvironmentFile; bot and dashboard read __WORKDIR__/.env in Python."
 echo "Check status:"
 echo "  systemctl --user status polybot-bot.service"
 echo "  systemctl --user status polybot-dashboard.service"

@@ -494,6 +494,17 @@
     </div>
   </div>
 
+  <div class="panel" id="clob-wallet-panel" style="display:none;margin-bottom:14px;">
+    <div class="panel-header">
+      <span class="panel-title">Polymarket CLOB — USDC collateral</span>
+      <span class="panel-badge" id="clob-wallet-badge">—</span>
+    </div>
+    <div class="panel-body" style="padding:10px 14px;font-family:var(--mono);font-size:12px;">
+      <div id="clob-wallet-main">—</div>
+      <div style="color:var(--text3);font-size:10px;margin-top:6px;line-height:1.35;" id="clob-wallet-sub"></div>
+    </div>
+  </div>
+
   <!-- Charts row -->
   <div class="charts-row">
     <div class="panel">
@@ -818,6 +829,34 @@ function fmtNum(v, maxFractionDigits = 0) {
   return Number(v || 0).toLocaleString('en', { maximumFractionDigits: maxFractionDigits });
 }
 
+function updateClobWalletPanel(d) {
+  const panel = el('clob-wallet-panel');
+  const main = el('clob-wallet-main');
+  const sub = el('clob-wallet-sub');
+  const badge = el('clob-wallet-badge');
+  const raw = d.clob_collateral_usdc;
+  const err = d.clob_collateral_usdc_error;
+  const v = raw == null ? NaN : Number(raw);
+  if (Number.isFinite(v)) {
+    panel.style.display = '';
+    main.textContent = 'Available USDC (exchange): $' + fmtNum(v, 2);
+    sub.textContent =
+      'This is what Polymarket CLOB reports for your API wallet. It is not the same as “Snapshot balance” / modeled equity in the stat cards, which comes from the bot ledger (starting reference + realized PnL).';
+    badge.textContent = 'CLOB';
+    badge.style.color = 'var(--green)';
+    return;
+  }
+  if (err) {
+    panel.style.display = '';
+    main.textContent = 'CLOB balance unavailable';
+    sub.textContent = err;
+    badge.textContent = 'WARN';
+    badge.style.color = 'var(--yellow)';
+    return;
+  }
+  panel.style.display = 'none';
+}
+
 function trendMarker(current, previous, preferLower = false) {
   if (previous === null || !Number.isFinite(previous)) return '=';
   if (Math.abs(current - previous) < 0.0001) return '=';
@@ -884,7 +923,7 @@ async function loadSummary() {
   if (dashboardSource === 'db') {
     el('stat-lbl-a').textContent = 'Cumulative fill volume';
     el('stat-lbl-b').textContent = 'Distinct markets (24h)';
-    el('stat-lbl-c').textContent = 'Snapshot balance';
+    el('stat-lbl-c').textContent = 'Modeled equity (ledger)';
     el('stat-lbl-d').textContent = 'Filled win rate';
 
     const fillVol = Number(d.bot_fill_volume || 0);
@@ -899,7 +938,8 @@ async function loadSummary() {
     const bal = Number(d.bot_balance || 0);
     el('stat-daily').textContent = '$' + fmtNum(bal, 0);
     el('stat-daily').style.color = 'var(--yellow)';
-    el('stat-daily-sub').textContent = `Daily PnL ${fmtPnl(Number(d.bot_daily_pnl || 0))}`;
+    el('stat-daily-sub').textContent =
+      `Daily PnL ${fmtPnl(Number(d.bot_daily_pnl || 0))} · internal ledger, not wallet USDC`;
 
     const wr = Number(d.bot_win_rate_pct || 0);
     el('stat-wr').textContent = wr.toFixed(1) + '%';
@@ -910,6 +950,7 @@ async function loadSummary() {
     el('ring-pct').textContent = pct.toFixed(1) + '%';
     const circ = 2 * Math.PI * 36;
     el('ring-circle').setAttribute('stroke-dashoffset', circ * (1 - pct / 100));
+    updateClobWalletPanel(d);
     return;
   }
 
@@ -941,6 +982,7 @@ async function loadSummary() {
   el('ring-pct').textContent = pct + '%';
   const circ = 2 * Math.PI * 36;
   el('ring-circle').setAttribute('stroke-dashoffset', circ * (1 - pct / 100));
+  updateClobWalletPanel(d);
 }
 
 async function loadPnlCurve() {

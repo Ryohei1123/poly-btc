@@ -151,6 +151,15 @@ def env_int_profile(name: str, default: int) -> int:
     return default
 
 
+def env_credential_any(*keys: str) -> str:
+    """First non-empty env among alternate names (POLY_* vs POLYMARKET_* in .env)."""
+    for k in keys:
+        raw = os.getenv(k)
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    return ""
+
+
 def normalize_private_key(raw: str) -> str:
     """Strip .env junk (quotes, whitespace) so eth_account accepts the key."""
     s = (raw or "").strip()
@@ -216,11 +225,21 @@ class Config:
     MIN_MID_DISTANCE_PCT: float = field(default_factory=lambda: env_float_profile("POLY_MIN_MID_DISTANCE_PCT", 0.005))       # Minimum bid/ask distance from mid to avoid crossing/taking
     MAX_MID_DISTANCE_PCT: float = field(default_factory=lambda: env_float_profile("POLY_MAX_MID_DISTANCE_PCT", 0.30))        # Maximum distance from mid (too far quotes are clipped)
 
-    # Auth (set via env or .env file)
-    PRIVATE_KEY: str = field(default_factory=lambda: os.getenv("POLY_PRIVATE_KEY", ""))
-    API_KEY: str     = field(default_factory=lambda: os.getenv("POLY_API_KEY", ""))
-    API_SECRET: str  = field(default_factory=lambda: os.getenv("POLY_API_SECRET", ""))
-    API_PASSPHRASE: str = field(default_factory=lambda: os.getenv("POLY_PASSPHRASE", ""))
+    # Auth (set via env or .env file — POLY_* or Polymarket-style POLYMARKET_*)
+    PRIVATE_KEY: str = field(
+        default_factory=lambda: env_credential_any("POLY_PRIVATE_KEY", "POLYMARKET_PRIVATE_KEY")
+    )
+    API_KEY: str = field(
+        default_factory=lambda: env_credential_any("POLY_API_KEY", "POLYMARKET_API_KEY")
+    )
+    API_SECRET: str = field(
+        default_factory=lambda: env_credential_any("POLY_API_SECRET", "POLYMARKET_API_SECRET")
+    )
+    API_PASSPHRASE: str = field(
+        default_factory=lambda: env_credential_any(
+            "POLY_PASSPHRASE", "POLYMARKET_API_PASSPHRASE", "POLYMARKET_PASSPHRASE"
+        )
+    )
 
     # Database
     DATABASE_URL: str = field(
@@ -239,20 +258,23 @@ def validate_runtime_config():
         raise RuntimeError(
             "POLY_ENABLE_LIVE_TRADING=1 is required. This bot places real Polymarket CLOB orders."
         )
+    auto_derive = env_bool("POLY_CLOB_AUTO_DERIVE_API_CREDS", True)
     missing = []
-    for env_name, value in {
-        "POLY_PRIVATE_KEY": config.PRIVATE_KEY,
-        "POLY_API_KEY": config.API_KEY,
-        "POLY_API_SECRET": config.API_SECRET,
-        "POLY_PASSPHRASE": config.API_PASSPHRASE,
-    }.items():
-        if not value:
-            missing.append(env_name)
+    if not (config.PRIVATE_KEY or "").strip():
+        missing.append("POLY_PRIVATE_KEY (or POLYMARKET_PRIVATE_KEY)")
+    if not auto_derive:
+        for env_name, value in {
+            "POLY_API_KEY": config.API_KEY,
+            "POLY_API_SECRET": config.API_SECRET,
+            "POLY_PASSPHRASE": config.API_PASSPHRASE,
+        }.items():
+            if not (value or "").strip():
+                missing.append(env_name)
     if missing:
         raise RuntimeError(
             f"Missing required CLOB credentials: {', '.join(missing)}. "
-            f"Expected secrets in {_REPO_ROOT / '.env'} (loaded with override). "
-            "If you use systemd, remove empty POLY_* lines from EnvironmentFile or omit them so .env supplies values."
+            f"With POLY_CLOB_AUTO_DERIVE_API_CREDS=1 (default) only the wallet private key is required; "
+            f"otherwise set POLY_* or POLYMARKET_* API fields in {_REPO_ROOT / '.env'}."
         )
 
     config.PRIVATE_KEY = normalize_private_key(config.PRIVATE_KEY)
@@ -1172,18 +1194,54 @@ def get_live_client():
     if live_client is not None:
         return live_client
     from py_clob_client.client import ClobClient
+    from py_clob_client.clob_types import ApiCreds
     from py_clob_client.constants import POLYGON
 
-    live_client = ClobClient(
-        host=config.CLOB_API,
-        chain_id=POLYGON,
-        key=config.PRIVATE_KEY,
-        creds={
-            "api_key": config.API_KEY,
-            "api_secret": config.API_SECRET,
-            "api_passphrase": config.API_PASSPHRASE,
-        }
-    )
+    host = (config.CLOB_API or "").strip().rstrip("/")
+    sig_type_str = (os.getenv("POLY_CLOB_SIGNATURE_TYPE") or "").strip()
+    signature_type = None
+    if sig_type_str:
+        try:
+            signature_type = int(sig_type_str)
+        except ValueError:
+            raise RuntimeError("POLY_CLOB_SIGNATURE_TYPE must be an integer (see Polymarket CLOB docs).") from None
+    funder = (os.getenv("POLY_CLOB_FUNDER") or "").strip() or None
+
+    auto_derive = env_bool("POLY_CLOB_AUTO_DERIVE_API_CREDS", True)
+    if auto_derive:
+        # L1-only client, then official create/derive — fixes 401 when manual API keys do not match the wallet.
+        client = ClobClient(
+            host=host,
+            chain_id=POLYGON,
+            key=config.PRIVATE_KEY,
+            creds=None,
+            signature_type=signature_type,
+            funder=funder,
+        )
+        creds = client.create_or_derive_api_creds()
+        if creds is None:
+            creds = client.derive_api_key()
+        if creds is None:
+            raise RuntimeError(
+                "Polymarket CLOB could not create or derive API credentials (returned None). "
+                "Try POLY_CLOB_AUTO_DERIVE_API_CREDS=0 with correct POLY_API_KEY / POLY_API_SECRET / POLY_PASSPHRASE."
+            )
+        client.set_api_creds(creds)
+        log.info("[LIVE] CLOB client using wallet-derived API credentials (POLY_CLOB_AUTO_DERIVE_API_CREDS).")
+        live_client = client
+    else:
+        live_client = ClobClient(
+            host=host,
+            chain_id=POLYGON,
+            key=config.PRIVATE_KEY,
+            creds=ApiCreds(
+                api_key=config.API_KEY,
+                api_secret=config.API_SECRET,
+                api_passphrase=config.API_PASSPHRASE,
+            ),
+            signature_type=signature_type,
+            funder=funder,
+        )
     return live_client
 
 def persist_trade(
@@ -1510,15 +1568,15 @@ async def place_order(
         return None
 
     try:
-        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.clob_types import OrderArgs
         client = get_live_client()
 
+        # OrderArgs has no order_type; create_and_post_order → post_order defaults to GTC.
         order_args = OrderArgs(
             token_id=token_id,
             price=price,
             size=size_shares,
             side=side,
-            order_type=OrderType.GTC,
         )
         resp = client.create_and_post_order(order_args)
         real_id = resp.get("orderID") or ""
@@ -1545,8 +1603,21 @@ async def place_order(
         state.kill_switch = True
         return None
     except Exception as e:
+        msg = str(e).lower()
         log.error(f"Order placement failed: {e}")
         state.errors.append(f"{datetime.now().isoformat()} | {e}")
+        if "geoblock" in msg or "restricted in your region" in msg:
+            log.critical(
+                "Polymarket CLOB geo-block (HTTP 403): this host/region cannot post orders. "
+                "See https://docs.polymarket.com/developers/CLOB/geoblock — use an allowed region/VPN or server location."
+            )
+            state.kill_switch = True
+        elif "401" in str(e) and ("invalid api key" in msg or "unauthorized" in msg):
+            log.critical(
+                "CLOB HTTP 401 (invalid API key). With POLY_CLOB_AUTO_DERIVE_API_CREDS=1 (default) the bot "
+                "derives keys from POLY_PRIVATE_KEY; set POLY_CLOB_AUTO_DERIVE_API_CREDS=0 only if you supply "
+                "matching manual POLY_* / POLYMARKET_* API credentials."
+            )
         return None
 
 # ─── Risk / Kill Switch ────────────────────────────────────────────────────────
