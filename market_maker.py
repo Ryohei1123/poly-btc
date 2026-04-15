@@ -147,6 +147,34 @@ def env_int_profile(name: str, default: int) -> int:
             return default
     return default
 
+
+def normalize_private_key(raw: str) -> str:
+    """Strip .env junk (quotes, whitespace) so eth_account accepts the key."""
+    s = (raw or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        s = s[1:-1].strip()
+    for ch in ("\ufeff", "\u200b", "\u200c", "\u200d"):
+        s = s.replace(ch, "")
+    return s.strip()
+
+
+def assert_valid_hex_private_key(s: str) -> None:
+    """ethereum keys: 32 bytes = 64 hex chars, optional 0x prefix."""
+    body = s[2:] if s.startswith(("0x", "0X")) else s
+    if len(body) != 64:
+        raise RuntimeError(
+            "POLY_PRIVATE_KEY must be exactly 64 hex characters (or 0x + 64 hex). "
+            f"After trimming quotes/whitespace, got {len(body)} hex characters."
+        )
+    try:
+        int(body, 16)
+    except ValueError as e:
+        raise RuntimeError(
+            "POLY_PRIVATE_KEY contains invalid hex (wrong character or stray spaces). "
+            "Use only 0-9 and a-f, no spaces inside the key."
+        ) from e
+
+
 @dataclass
 class Config:
     STRATEGY_PROFILE: str = field(default_factory=selected_profile)
@@ -219,6 +247,12 @@ def validate_runtime_config():
             missing.append(env_name)
     if missing:
         raise RuntimeError(f"Missing required CLOB credentials: {', '.join(missing)}")
+
+    config.PRIVATE_KEY = normalize_private_key(config.PRIVATE_KEY)
+    assert_valid_hex_private_key(config.PRIVATE_KEY)
+    config.API_KEY = (config.API_KEY or "").strip()
+    config.API_SECRET = (config.API_SECRET or "").strip()
+    config.API_PASSPHRASE = (config.API_PASSPHRASE or "").strip()
 
 def notional_to_shares(notional_usdc: float, price: float) -> float:
     if notional_usdc <= 0:
@@ -1338,6 +1372,10 @@ def sync_live_trades_with_exchange() -> Dict[str, int]:
     stats: Dict[str, int] = {"filled": 0, "cancelled": 0, "skipped": 0, "fill_ticks": 0}
     try:
         client = get_live_client()
+    except Exception as e:
+        log.warning(f"[LIVE] sync: CLOB client init failed: {e}")
+        return stats
+    try:
         open_list = client.get_orders() or []
     except Exception as e:
         log.warning(f"[LIVE] sync: get_orders failed: {e}")
@@ -1535,7 +1573,10 @@ def cancel_live_orders_best_effort() -> int:
     """
     try:
         client = get_live_client()
-
+    except Exception as e:
+        log.warning(f"Unable to cancel stale orders (CLOB client init): {e}")
+        return 0
+    try:
         for method_name in ("cancel_all", "cancel_all_orders"):
             method = getattr(client, method_name, None)
             if callable(method):
