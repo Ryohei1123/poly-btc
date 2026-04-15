@@ -930,7 +930,7 @@ async function loadSummary() {
     const realized = Number(d.bot_realized_pnl || 0);
     el('stat-pnl').textContent = '$' + fmtNum(fillVol, 0);
     el('stat-pnl').style.color = realized >= 0 ? 'var(--green)' : 'var(--red)';
-    el('stat-pnl-sub').textContent = `Realized ${fmtPnl(realized)} · ${Number(d.bot_filled_count || 0)} fills · not wallet balance`;
+    el('stat-pnl-sub').textContent = `Realized ${fmtPnl(realized)} · ${Number(d.bot_filled_count || 0)} fills `;
 
     el('stat-trades').textContent = String(Number(d.bot_distinct_markets_24h || 0));
     el('stat-trades-sub').textContent = `Bot trades (all time): ${Number(d.bot_total_trades || 0)}`;
