@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=__WORKDIR__
+# Avoid empty KEY= lines — bot/dashboard load .env with override=True from this directory.
 EnvironmentFile=__WORKDIR__/.env
 ExecStart=__PYTHON__ __WORKDIR__/server.py
 Restart=always

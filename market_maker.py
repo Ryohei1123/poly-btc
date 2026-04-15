@@ -27,8 +27,9 @@ from dotenv import load_dotenv
 from db_schema import apply_schema
 
 _REPO_ROOT = Path(__file__).resolve().parent
-# Always load poly-btc/.env from this file's directory (systemd/cron may use a different cwd).
-load_dotenv(_REPO_ROOT / ".env")
+# Repo .env wins over inherited environment (systemd EnvironmentFile often sets KEY= empty,
+# which would otherwise block dotenv from filling the same keys with override=False).
+load_dotenv(_REPO_ROOT / ".env", override=True)
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -248,7 +249,11 @@ def validate_runtime_config():
         if not value:
             missing.append(env_name)
     if missing:
-        raise RuntimeError(f"Missing required CLOB credentials: {', '.join(missing)}")
+        raise RuntimeError(
+            f"Missing required CLOB credentials: {', '.join(missing)}. "
+            f"Expected secrets in {_REPO_ROOT / '.env'} (loaded with override). "
+            "If you use systemd, remove empty POLY_* lines from EnvironmentFile or omit them so .env supplies values."
+        )
 
     config.PRIVATE_KEY = normalize_private_key(config.PRIVATE_KEY)
     assert_valid_hex_private_key(config.PRIVATE_KEY)
@@ -1644,6 +1649,7 @@ async def main_loop():
     log.info("  Polymarket Market Making Bot  |  Starting up...")
     log.info("=" * 60)
     validate_runtime_config()
+    log.info("Runtime OK: POLY_ENABLE_LIVE_TRADING and CLOB credentials validated.")
     state.starting_balance = 0.0
     refresh_account_state()
     log.info(
@@ -1937,4 +1943,9 @@ def update_runtime_state():
     )
 
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    try:
+        asyncio.run(main_loop())
+    except Exception:
+        # Unhandled errors (e.g. validate_runtime_config) bypass normal cycle logging; ensure bot log + stderr match.
+        log.exception("Bot process exiting on startup or fatal error — fix configuration and restart.")
+        raise

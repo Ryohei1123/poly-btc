@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from db_schema import apply_schema
 
 _REPO_ROOT = Path(__file__).resolve().parent
-load_dotenv(_REPO_ROOT / ".env")
+load_dotenv(_REPO_ROOT / ".env", override=True)
 
 def env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
