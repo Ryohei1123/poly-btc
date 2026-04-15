@@ -277,13 +277,16 @@
   .chart-wrap { position: relative; height: 220px; }
 
   /* ─── Bottom Row ─── */
-  .bottom-row {
+  .trades-row { margin-bottom: 14px; }
+  .secondary-row {
     display: grid;
-    grid-template-columns: 1.4fr 1fr 1fr;
-    gap: 14px; margin-bottom: 20px;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-bottom: 20px;
   }
-  @media (max-width: 1100px) { .bottom-row { grid-template-columns: 1fr 1fr; } }
-  @media (max-width: 700px)  { .bottom-row { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) {
+    .secondary-row { grid-template-columns: 1fr; }
+  }
 
   /* ─── Trade Table ─── */
   .trade-table { width: 100%; border-collapse: collapse; }
@@ -305,6 +308,85 @@
   .side-sell { color: var(--red) !important; }
   .pnl-pos   { color: var(--green) !important; }
   .pnl-neg   { color: var(--red) !important; }
+  .trade-table.polymarket-style {
+    table-layout: fixed;
+  }
+  .trade-table.polymarket-style thead th {
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    background: var(--bg2);
+    box-shadow: 0 1px 0 var(--border);
+  }
+  .trade-table.polymarket-style th {
+    font-size: 10px;
+    padding: 9px 10px;
+    letter-spacing: 0.05em;
+  }
+  .trade-table.polymarket-style th.num-head {
+    text-align: right;
+  }
+  .trade-table.polymarket-style td {
+    font-size: 12px;
+    padding: 9px 10px;
+    white-space: normal;
+    vertical-align: middle;
+    line-height: 1.3;
+  }
+  .trade-table.polymarket-style td.market-cell {
+    width: 58%;
+  }
+  .trade-table.polymarket-style .market-main {
+    font-family: var(--sans);
+    font-size: 16px;
+    color: var(--text1);
+    line-height: 1.2;
+    margin-bottom: 3px;
+  }
+  .trade-table.polymarket-style .market-sub {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text3);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .trade-table.polymarket-style td.num-cell {
+    text-align: right;
+    width: 10%;
+    font-family: var(--mono);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .trade-table.polymarket-style td.url-cell {
+    width: 12%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: left;
+  }
+  .trade-table.polymarket-style .side-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    border: 1px solid transparent;
+  }
+  .trade-table.polymarket-style .side-pill.yes {
+    color: var(--green);
+    background: rgba(0,229,160,0.12);
+    border-color: rgba(0,229,160,0.26);
+  }
+  .trade-table.polymarket-style .side-pill.no {
+    color: var(--red);
+    background: rgba(255,77,106,0.12);
+    border-color: rgba(255,77,106,0.26);
+  }
 
   /* ─── Market Breakdown ─── */
   .market-item {
@@ -527,9 +609,8 @@
     </div>
   </div>
 
-  <!-- Bottom Row -->
-  <div class="bottom-row">
-    <!-- Live Markets -->
+  <!-- Recent Orders Row -->
+  <div class="trades-row">
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title" id="trades-panel-title">Live Market Snapshot</span>
@@ -537,7 +618,8 @@
       </div>
       <div class="panel-body" style="padding:0">
         <div class="table-scroll">
-          <table class="trade-table">
+          <table class="trade-table" id="trade-table">
+            <colgroup id="trade-table-colgroup"></colgroup>
             <thead id="trade-table-head">
               <tr>
                 <th>Time</th>
@@ -558,8 +640,10 @@
         </div>
       </div>
     </div>
+  </div>
 
-    <!-- Market Volume Breakdown -->
+  <!-- Secondary Row -->
+  <div class="secondary-row">
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title" id="markets-panel-title">Market Volume Breakdown</span>
@@ -573,19 +657,13 @@
       </div>
     </div>
 
-    <!-- 24h change + breadth ring -->
-    <div style="display:flex;flex-direction:column;gap:14px;">
-      <div class="panel" style="flex:1">
-        <div class="panel-header">
-          <span class="panel-title" id="hourly-panel-title">24h Change by Market (%)</span>
-        </div>
-        <div class="panel-body">
-          <div class="chart-wrap" style="height:160px"><canvas id="hourly-chart"></canvas></div>
-        </div>
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title" id="hourly-panel-title">24h Change by Market (%)</span>
       </div>
-      <div class="panel">
-        <div class="panel-header"><span class="panel-title">YES >= 50% Breadth</span></div>
-        <div class="panel-body" style="display:flex;justify-content:center;padding:12px">
+      <div class="panel-body">
+        <div class="chart-wrap" style="height:180px"><canvas id="hourly-chart"></canvas></div>
+        <div style="display:flex;justify-content:center;padding-top:10px">
           <div class="ring-wrap">
             <svg class="ring" width="90" height="90" viewBox="0 0 90 90">
               <circle cx="45" cy="45" r="36" fill="none" stroke="var(--bg3)" stroke-width="8"/>
@@ -595,7 +673,7 @@
                 stroke-linecap="round" style="transition:stroke-dashoffset 1s"/>
             </svg>
             <div class="ring-text" id="ring-pct">—%</div>
-            <div class="ring-sub">breadth</div>
+            <div class="ring-sub">YES >= 50% breadth</div>
           </div>
         </div>
       </div>
@@ -1025,13 +1103,24 @@ async function loadBtc() {
 
 function setTradesTableHead(isBot) {
   const thead = el('trade-table-head');
+  const table = el('trade-table');
+  const colgroup = el('trade-table-colgroup');
   if (!thead) return;
   if (isBot) {
+    if (table) table.classList.add('polymarket-style');
+    if (colgroup) colgroup.innerHTML = `
+      <col style="width:58%">
+      <col style="width:10%">
+      <col style="width:10%">
+      <col style="width:10%">
+      <col style="width:12%">
+    `;
     thead.innerHTML = `<tr>
-      <th>Time</th><th>Market</th><th>Side</th><th>Price</th><th>Status</th>
-      <th>Notional</th><th>PnL</th><th>Mode</th><th>URL</th>
+      <th>Market</th><th class="num-head">Avg</th><th class="num-head">Current</th><th class="num-head">Value</th><th>URL</th>
     </tr>`;
   } else {
+    if (table) table.classList.remove('polymarket-style');
+    if (colgroup) colgroup.innerHTML = '';
     thead.innerHTML = `<tr>
       <th>Time</th><th>Market</th><th>YES</th><th>NO</th><th>MID</th>
       <th>Spread</th><th>Volume</th><th>24h</th><th>Market URL</th>
@@ -1053,19 +1142,63 @@ async function loadTrades() {
     return;
   }
   if (isBot) {
-    tbody.innerHTML = data.map(t => `
+    const grouped = new Map();
+    for (const t of data) {
+      const key = t.market_q || '—';
+      const shares = Math.abs(Number(t.size_shares || 0));
+      const side = String(t.side || '').toUpperCase();
+      const signedShares = side === 'SELL' ? -shares : shares;
+      const pxC = Number(t.price_cents || 0);
+      const notional = Number(t.volume_usd || 0);
+      const pnl = Number(t.pnl || 0);
+      let g = grouped.get(key);
+      if (!g) {
+        g = {
+          market_q: t.market_q || '—',
+          market_url: t.market_url || '',
+          current_c: pxC,
+          avg_num: 0,
+          avg_den: 0,
+          net_shares: 0,
+          pnl: 0,
+          ts: t.ts || '',
+          notional: 0,
+        };
+      }
+      // First row is most recent because API returns DESC.
+      if (!g.current_c && pxC) g.current_c = pxC;
+      g.avg_num += pxC * shares;
+      g.avg_den += shares;
+      g.net_shares += signedShares;
+      g.pnl += pnl;
+      g.notional += notional;
+      grouped.set(key, g);
+    }
+    const rows = [...grouped.values()].map(g => {
+      const avgC = g.avg_den > 0 ? (g.avg_num / g.avg_den) : 0;
+      const currentC = Number(g.current_c || 0);
+      const valueUsd = Math.abs(g.net_shares) * (currentC / 100.0);
+      const sideLabel = g.net_shares >= 0 ? 'Yes' : 'No';
+      const sideClass = g.net_shares >= 0 ? 'yes' : 'no';
+      return { ...g, avgC, currentC, valueUsd, sideLabel, sideClass };
+    });
+    tbody.innerHTML = rows.map(r => `
     <tr>
-      <td>${fmtTime(t.ts)}</td>
-      <td title="${t.market_q||''}">${truncate(t.market_q||'—', 26)}</td>
-      <td style="color:var(--yellow)">${t.side||'—'}</td>
-      <td>${(+t.price_cents).toFixed(2)}c</td>
-      <td style="font-family:var(--mono);font-size:11px">${t.status||'—'}</td>
-      <td>$${fmtNum(+t.volume_usd, 0)}</td>
-      <td class="${(+t.pnl)>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(+t.pnl)}</td>
-      <td style="color:var(--text3);font-size:11px">${t.mode||'—'}</td>
-      <td>${
-        t.market_url
-          ? `<a href="${t.market_url}" target="_blank" rel="noopener noreferrer" style="color:var(--green);text-decoration:none">${truncate(t.market_url.replace('https://',''), 28)}</a>`
+      <td class="market-cell">
+        <div class="market-main" title="${r.market_q}">${r.market_q || '—'}</div>
+        <div class="market-sub">
+          <span class="side-pill ${r.sideClass}">${r.sideLabel}</span>
+          <span>${r.avgC.toFixed(1)}c avg</span>
+          <span>${fmtNum(Math.abs(r.net_shares), 1)} shares</span>
+          <span>${fmtPnl(r.pnl)} PnL</span>
+        </div>
+      </td>
+      <td class="num-cell">${r.avgC.toFixed(1)}c</td>
+      <td class="num-cell">${r.currentC.toFixed(1)}c</td>
+      <td class="num-cell">$${fmtNum(r.valueUsd, 2)}</td>
+      <td class="url-cell">${
+        r.market_url
+          ? `<a href="${r.market_url}" target="_blank" rel="noopener noreferrer" style="color:var(--green);text-decoration:none">${truncate(r.market_url.replace('https://',''), 44)}</a>`
           : '<span style="color:var(--text3)">—</span>'
       }</td>
     </tr>`).join('');
