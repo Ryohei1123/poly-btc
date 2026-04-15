@@ -410,7 +410,16 @@ def _summary_from_db(con, markets: list, btc_price: float) -> dict:
     ).fetchone()
     agg = con.execute(
         """SELECT
-            COALESCE(SUM(COALESCE(notional_usdc, size, 0)), 0) AS vol,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN status = 'filled'
+                        THEN COALESCE(fill_price * size_shares, notional_usdc, size, 0)
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS vol,
             COUNT(*) FILTER (WHERE status = 'filled') AS n_filled,
             COUNT(*) FILTER (WHERE status = 'filled' AND pnl > 0) AS n_wins
         FROM trades"""
