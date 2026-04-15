@@ -14,6 +14,10 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS market_slug TEXT",
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS event_slug TEXT",
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS mode TEXT DEFAULT 'live'",
+    # Repo is live-CLOB only; older DBs may still have paper/sim labels on trade rows.
+    """UPDATE trades SET mode = 'live'
+       WHERE LOWER(TRIM(COALESCE(mode, ''))) IN ('paper', 'sim', 'simulation')""",
+    "ALTER TABLE trades ALTER COLUMN mode SET DEFAULT 'live'",
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS notional_usdc REAL",
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS size_shares REAL",
     """CREATE TABLE IF NOT EXISTS quotes (

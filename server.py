@@ -18,7 +18,8 @@ from flask import Flask, jsonify, send_from_directory, g
 from dotenv import load_dotenv
 from db_schema import apply_schema
 
-load_dotenv()
+_REPO_ROOT = Path(__file__).resolve().parent
+load_dotenv(_REPO_ROOT / ".env")
 
 def env_float(name: str, default: float) -> float:
     raw = os.getenv(name)

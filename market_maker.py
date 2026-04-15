@@ -26,7 +26,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 from db_schema import apply_schema
 
-load_dotenv()
+_REPO_ROOT = Path(__file__).resolve().parent
+# Always load poly-btc/.env from this file's directory (systemd/cron may use a different cwd).
+load_dotenv(_REPO_ROOT / ".env")
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
