@@ -441,75 +441,111 @@ def _iso_to_ts(iso: str) -> str:
     except Exception:
         return str(iso)[:16]
 
+
+def _gamma_market_array(payload) -> list:
+    """Gamma usually returns a JSON array; tolerate wrapped shapes."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        inner = payload.get("data")
+        if isinstance(inner, list):
+            return inner
+    return []
+
+
+def _btc_rows_from_gamma_markets(items: list) -> list:
+    """Filter to BTC-ish questions and normalize fields (same idea as market_maker.get_btc_markets)."""
+    markets_out = []
+    for m in items:
+        q = str(m.get("question", "") or "")
+        q_lower = q.lower()
+        if "bitcoin" not in q_lower and "btc" not in q_lower:
+            continue
+        if not m.get("active"):
+            continue
+
+        outcomes = [str(x).strip().lower() for x in _parse_list_field(m.get("outcomes"))]
+        outcome_prices = _parse_list_field(m.get("outcomePrices"))
+        yes_idx = outcomes.index("yes") if "yes" in outcomes else 0
+        no_idx = outcomes.index("no") if "no" in outcomes else (1 if yes_idx == 0 else 0)
+        if not outcome_prices:
+            outcome_prices = [0.5, 0.5]
+        yes_idx = max(0, min(yes_idx, len(outcome_prices) - 1))
+        no_idx = max(0, min(no_idx, len(outcome_prices) - 1))
+        yes_price = _safe_float(outcome_prices[yes_idx], 0.5)
+        no_price = _safe_float(outcome_prices[no_idx], 0.5)
+
+        best_bid = _safe_float(m.get("bestBid"), 0.0)
+        best_ask = _safe_float(m.get("bestAsk"), 0.0)
+        mid = ((best_bid + best_ask) / 2.0) if best_bid > 0 and best_ask > 0 else yes_price
+        spread = (best_ask - best_bid) if best_bid > 0 and best_ask > 0 else 0.0
+
+        one_day_change = _safe_float(m.get("oneDayPriceChange"), 0.0)
+        if abs(one_day_change) <= 1.5:
+            one_day_change *= 100.0
+
+        events = m.get("events") if isinstance(m.get("events"), list) else []
+        event_slug = ""
+        if events:
+            event_slug = str(events[0].get("slug", "") or "").strip()
+        market_slug = str(m.get("slug", "") or "").strip()
+
+        markets_out.append({
+            "ts": _iso_to_ts(m.get("updatedAt") or m.get("endDate")),
+            "question": q,
+            "market_slug": market_slug,
+            "event_slug": event_slug,
+            "market_url": market_url_from_slugs(market_slug, event_slug),
+            "yes_price": max(0.0, min(1.0, yes_price)),
+            "no_price": max(0.0, min(1.0, no_price)),
+            "mid_price": max(0.0, min(1.0, mid)),
+            "best_bid": max(0.0, min(1.0, best_bid)),
+            "best_ask": max(0.0, min(1.0, best_ask)),
+            "spread": max(0.0, spread),
+            "one_day_change_pct": one_day_change,
+            "volume": _safe_float(m.get("volume"), 0.0),
+            "liquidity": _safe_float(m.get("liquidity"), 0.0),
+        })
+    markets_out.sort(key=lambda x: x["volume"], reverse=True)
+    return markets_out
+
+
 def get_live_btc_markets():
     now = time.time()
     cached = LIVE_CACHE["markets"]
     if now - float(cached["ts"]) < 10:
         return cached["data"]
 
-    payload = _fetch_json(
-        f"{GAMMA_API}/markets",
-        params={
-            "active": "true",
-            "closed": "false",
-            "limit": 2000,
-            "_order": "volume",
-        },
-        timeout=10,
-    )
-    markets_out = []
-    if isinstance(payload, list):
-        for m in payload:
-            q = str(m.get("question", "") or "")
-            q_lower = q.lower()
-            if "bitcoin" not in q_lower and "btc" not in q_lower:
-                continue
-            if not m.get("active"):
-                continue
+    # Match market_maker.py: crypto-tagged fetch surfaces BTC markets; global top-N can omit them.
+    raw_limit = int(os.getenv("POLY_MARKETS_FETCH_LIMIT", "1000") or "1000")
+    fetch_limit = max(100, min(raw_limit, 3000))
+    tag = (os.getenv("POLY_GAMMA_TAG_SLUG", "crypto") or "").strip()
 
-            outcomes = [str(x).strip().lower() for x in _parse_list_field(m.get("outcomes"))]
-            outcome_prices = _parse_list_field(m.get("outcomePrices"))
-            yes_idx = outcomes.index("yes") if "yes" in outcomes else 0
-            no_idx = outcomes.index("no") if "no" in outcomes else (1 if yes_idx == 0 else 0)
-            if not outcome_prices:
-                outcome_prices = [0.5, 0.5]
-            yes_idx = max(0, min(yes_idx, len(outcome_prices) - 1))
-            no_idx = max(0, min(no_idx, len(outcome_prices) - 1))
-            yes_price = _safe_float(outcome_prices[yes_idx], 0.5)
-            no_price = _safe_float(outcome_prices[no_idx], 0.5)
+    base_params = {
+        "active": "true",
+        "closed": "false",
+        "limit": fetch_limit,
+        "_order": "volume",
+    }
+    if tag:
+        base_params["tag_slug"] = tag
 
-            best_bid = _safe_float(m.get("bestBid"), 0.0)
-            best_ask = _safe_float(m.get("bestAsk"), 0.0)
-            mid = ((best_bid + best_ask) / 2.0) if best_bid > 0 and best_ask > 0 else yes_price
-            spread = (best_ask - best_bid) if best_bid > 0 and best_ask > 0 else 0.0
+    payload = _fetch_json(f"{GAMMA_API}/markets", params=base_params, timeout=10)
+    markets_out = _btc_rows_from_gamma_markets(_gamma_market_array(payload))
 
-            one_day_change = _safe_float(m.get("oneDayPriceChange"), 0.0)
-            if abs(one_day_change) <= 1.5:
-                one_day_change *= 100.0
+    if not markets_out:
+        payload_all = _fetch_json(
+            f"{GAMMA_API}/markets",
+            params={
+                "active": "true",
+                "closed": "false",
+                "limit": fetch_limit,
+                "_order": "volume",
+            },
+            timeout=10,
+        )
+        markets_out = _btc_rows_from_gamma_markets(_gamma_market_array(payload_all))
 
-            events = m.get("events") if isinstance(m.get("events"), list) else []
-            event_slug = ""
-            if events:
-                event_slug = str(events[0].get("slug", "") or "").strip()
-            market_slug = str(m.get("slug", "") or "").strip()
-
-            markets_out.append({
-                "ts": _iso_to_ts(m.get("updatedAt") or m.get("endDate")),
-                "question": q,
-                "market_slug": market_slug,
-                "event_slug": event_slug,
-                "market_url": market_url_from_slugs(market_slug, event_slug),
-                "yes_price": max(0.0, min(1.0, yes_price)),
-                "no_price": max(0.0, min(1.0, no_price)),
-                "mid_price": max(0.0, min(1.0, mid)),
-                "best_bid": max(0.0, min(1.0, best_bid)),
-                "best_ask": max(0.0, min(1.0, best_ask)),
-                "spread": max(0.0, spread),
-                "one_day_change_pct": one_day_change,
-                "volume": _safe_float(m.get("volume"), 0.0),
-                "liquidity": _safe_float(m.get("liquidity"), 0.0),
-            })
-    markets_out.sort(key=lambda x: x["volume"], reverse=True)
     LIVE_CACHE["markets"] = {"ts": now, "data": markets_out}
     return markets_out
 
@@ -657,32 +693,39 @@ def status():
         **env_flags,
     })
 
+def _execution_telemetry_empty_payload():
+    return {
+        "quotes_considered_cycle": 0,
+        "quotes_eligible_cycle": 0,
+        "order_attempts_cycle": 0,
+        "order_acks_cycle": 0,
+        "fills_cycle": 0,
+        "quote_hit_rate_cycle": 0.0,
+        "ack_rate_cycle": 0.0,
+        "fill_rate_cycle": 0.0,
+        "avg_edge_cycle": 0.0,
+        "avg_order_distance_cycle": 0.0,
+        "quote_hit_rate_avg": 0.0,
+        "ack_rate_avg": 0.0,
+        "fill_rate_avg": 0.0,
+        "avg_edge_avg": 0.0,
+        "avg_order_distance_avg": 0.0,
+        "updated_at": None,
+        "thresholds": EXEC_THRESHOLDS,
+        "score_weights": EXEC_SCORE_WEIGHTS,
+        "score_thresholds": EXEC_SCORE_THRESHOLDS,
+    }
+
+
 @app.route("/api/execution_telemetry")
 def execution_telemetry():
-    con = get_db()
-    row = con.execute(SQL_EXEC_TELEMETRY).fetchone()
+    try:
+        con = get_db()
+        row = con.execute(SQL_EXEC_TELEMETRY).fetchone()
+    except Exception:
+        return jsonify(_execution_telemetry_empty_payload())
     if not row:
-        return jsonify({
-            "quotes_considered_cycle": 0,
-            "quotes_eligible_cycle": 0,
-            "order_attempts_cycle": 0,
-            "order_acks_cycle": 0,
-            "fills_cycle": 0,
-            "quote_hit_rate_cycle": 0.0,
-            "ack_rate_cycle": 0.0,
-            "fill_rate_cycle": 0.0,
-            "avg_edge_cycle": 0.0,
-            "avg_order_distance_cycle": 0.0,
-            "quote_hit_rate_avg": 0.0,
-            "ack_rate_avg": 0.0,
-            "fill_rate_avg": 0.0,
-            "avg_edge_avg": 0.0,
-            "avg_order_distance_avg": 0.0,
-            "updated_at": None,
-            "thresholds": EXEC_THRESHOLDS,
-            "score_weights": EXEC_SCORE_WEIGHTS,
-            "score_thresholds": EXEC_SCORE_THRESHOLDS,
-        })
+        return jsonify(_execution_telemetry_empty_payload())
     return jsonify({
         "quotes_considered_cycle": int(row["quotes_considered_cycle"] or 0),
         "quotes_eligible_cycle": int(row["quotes_eligible_cycle"] or 0),

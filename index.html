@@ -793,7 +793,15 @@ function updateChart(chart, labels, data) {
 // ─── Data fetching ────────────────────────────────────────────────────────────
 async function fetchJSON(url) {
   const r = await fetch(url);
-  return r.json();
+  const text = await r.text();
+  if (!r.ok) {
+    throw new Error(`${url} HTTP ${r.status}: ${text.slice(0, 200)}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (_e) {
+    throw new Error(`${url}: response is not JSON`);
+  }
 }
 
 function fmtPnl(v) {
@@ -1060,7 +1068,7 @@ async function loadMarkets() {
     }).join('');
     return;
   }
-  const maxVolume = Math.max(...data.map(d => Math.abs(+d.volume)));
+  const maxVolume = Math.max(...data.map(d => Math.abs(+d.volume)), 1e-9);
   el('markets-breakdown').innerHTML = data.slice(0,6).map(m => `
     <div class="market-item">
       <div class="market-label" title="${m.market_q||''}">${truncate(m.market_q||'—', 22)}</div>
@@ -1189,20 +1197,35 @@ async function loadExecutionTelemetry() {
 }
 
 // ─── Refresh all ─────────────────────────────────────────────────────────────
+async function safeLoad(name, fn) {
+  try {
+    await fn();
+  } catch (e) {
+    console.error(`[dashboard] ${name}`, e);
+  }
+}
+
 async function refreshAll() {
   el('last-update').textContent = 'Refreshing…';
-  await loadSummary();
+  try {
+    await loadSummary();
+  } catch (e) {
+    console.error('[dashboard] loadSummary', e);
+    el('stat-pnl-sub').textContent =
+      'Could not load /api/summary. Check server logs and outbound HTTPS to Gamma + Binance.';
+    el('stat-trades-sub').textContent = (e && e.message) ? String(e.message).slice(0, 140) : 'Request failed';
+  }
   applyDashboardChrome();
   await Promise.all([
-    loadStatus(),
-    loadPnlCurve(),
-    loadBtc(),
-    loadTrades(),
-    loadMarkets(),
-    loadHourly(),
-    loadQuotes(),
-    loadLogs(),
-    loadExecutionTelemetry(),
+    safeLoad('loadStatus', loadStatus),
+    safeLoad('loadPnlCurve', loadPnlCurve),
+    safeLoad('loadBtc', loadBtc),
+    safeLoad('loadTrades', loadTrades),
+    safeLoad('loadMarkets', loadMarkets),
+    safeLoad('loadHourly', loadHourly),
+    safeLoad('loadQuotes', loadQuotes),
+    safeLoad('loadLogs', loadLogs),
+    safeLoad('loadExecutionTelemetry', loadExecutionTelemetry),
   ]);
   el('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
 }
