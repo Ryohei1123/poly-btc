@@ -1,3 +1,0 @@
-date_utc,mode,total_trades_all_time,filled_orders_24h,wins_24h,win_rate_24h_pct,fill_notional_24h_usd,realized_pnl_24h_usd,daily_pnl_snapshot_usd,balance_snapshot_usd,quote_hit_rate_avg_pct,ack_rate_avg_pct,fill_rate_avg_pct,avg_edge_avg_pct,avg_order_distance_avg_pct,cycle_latency_avg_ms,errors_snapshot
-2026-04-15,paper,98,126,68,53.97,630.0,238.6927,238.6927,238.6927,66.67,100.0,100.0,6.3421,6.1308,3409.9,0
-2026-04-15,paper,5926,6769,4602,67.99,33845.0,13581.453,13575.425,12143.139,85.0,100.0,100.0,16.9299,11.8876,10062.3,0
