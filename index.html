@@ -923,7 +923,7 @@ async function loadSummary() {
   if (dashboardSource === 'db') {
     el('stat-lbl-a').textContent = 'Filled notional (lifetime)';
     el('stat-lbl-b').textContent = 'Distinct markets (24h)';
-    el('stat-lbl-c').textContent = 'Modeled equity (ledger)';
+    el('stat-lbl-c').textContent = 'Current balance (CLOB)';
     el('stat-lbl-d').textContent = 'Filled win rate';
 
     const fillVol = Number(d.bot_fill_volume || 0);
@@ -935,11 +935,20 @@ async function loadSummary() {
     el('stat-trades').textContent = String(Number(d.bot_distinct_markets_24h || 0));
     el('stat-trades-sub').textContent = `Bot trades (all time): ${Number(d.bot_total_trades || 0)}`;
 
-    const bal = Number(d.bot_balance || 0);
-    el('stat-daily').textContent = '$' + fmtNum(bal, 0);
+    const clobBalRaw = d.clob_collateral_usdc;
+    const clobBal = Number(clobBalRaw);
+    const hasClobBal = Number.isFinite(clobBalRaw) || Number.isFinite(clobBal);
+    const ledgerBal = Number(d.bot_balance || 0);
+    const shownBal = hasClobBal ? clobBal : ledgerBal;
+    el('stat-daily').textContent = '$' + fmtNum(shownBal, 2);
     el('stat-daily').style.color = 'var(--yellow)';
-    el('stat-daily-sub').textContent =
-      `Daily PnL ${fmtPnl(Number(d.bot_daily_pnl || 0))} · internal ledger, not wallet USDC`;
+    if (hasClobBal) {
+      el('stat-daily-sub').textContent =
+        `Ledger ${fmtPnl(ledgerBal)} · Daily ${fmtPnl(Number(d.bot_daily_pnl || 0))}`;
+    } else {
+      el('stat-daily-sub').textContent =
+        `Daily PnL ${fmtPnl(Number(d.bot_daily_pnl || 0))} · fallback to internal ledger`;
+    }
 
     const wr = Number(d.bot_win_rate_pct || 0);
     el('stat-wr').textContent = wr.toFixed(1) + '%';
