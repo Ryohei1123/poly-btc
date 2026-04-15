@@ -17,6 +17,7 @@ import time
 import math
 import statistics
 import re
+import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, field
 from typing import Dict, Optional
@@ -252,12 +253,17 @@ class Config:
 config = Config()
 live_client = None
 
+def is_live_mode() -> bool:
+    return bool(config.ENABLE_LIVE_TRADING)
+
 def validate_runtime_config():
-    """This codebase runs CLOB orders only; paper simulation has been removed."""
-    if not config.ENABLE_LIVE_TRADING:
-        raise RuntimeError(
-            "POLY_ENABLE_LIVE_TRADING=1 is required. This bot places real Polymarket CLOB orders."
+    """Validate runtime config for live mode. Paper mode skips CLOB credential checks."""
+    if not is_live_mode():
+        log.warning(
+            "Paper mode enabled (POLY_ENABLE_LIVE_TRADING=0). "
+            "No real Polymarket orders will be sent."
         )
+        return
     auto_derive = env_bool("POLY_CLOB_AUTO_DERIVE_API_CREDS", True)
     missing = []
     if not (config.PRIVATE_KEY or "").strip():
@@ -679,22 +685,81 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
     Fetch active BTC prediction markets from Gamma API.
     These are markets with questions like "Will BTC be above $X on date?"
     """
+    target_fetch = max(100, min(config.MARKETS_FETCH_LIMIT, 3000))
+    markets_raw: list[dict] = []
     try:
-        async with session.get(
-            f"{config.GAMMA_API}/markets",
-            params={
-                "active": "true",
-                "closed": "false",
-                "tag_slug": "crypto",
-                "limit": max(100, min(config.MARKETS_FETCH_LIMIT, 3000)),
-                "_order": "volume",
-            },
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as r:
-            markets_raw = await r.json()
+        # Prefer event feed scoped to Bitcoin tag; this tracks the visible BTC shelf
+        # better than raw /markets top-volume pages.
+        event_offset = 0
+        event_page_size = 200
+        while len(markets_raw) < target_fetch:
+            async with session.get(
+                f"{config.GAMMA_API}/events",
+                params={
+                    "active": "true",
+                    "closed": "false",
+                    "tag_slug": "bitcoin",
+                    "limit": event_page_size,
+                    "offset": event_offset,
+                    "_order": "volume",
+                },
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                events_page = await r.json()
+            if not isinstance(events_page, list) or not events_page:
+                break
+
+            for ev in events_page:
+                ev_slug = str(ev.get("slug", "") or "")
+                ev_title = str(ev.get("title", "") or "")
+                for m in (ev.get("markets") or []):
+                    if not isinstance(m, dict):
+                        continue
+                    row = dict(m)
+                    row["_event_slug"] = ev_slug
+                    row["_event_title"] = ev_title
+                    markets_raw.append(row)
+                    if len(markets_raw) >= target_fetch:
+                        break
+                if len(markets_raw) >= target_fetch:
+                    break
+
+            if len(events_page) < event_page_size:
+                break
+            event_offset += len(events_page)
     except Exception as e:
         log.error(f"Gamma API error: {e}")
         return []
+
+    # Fallback for environments where /events payload is unavailable.
+    if not markets_raw:
+        try:
+            offset = 0
+            page_size = 1000
+            while len(markets_raw) < target_fetch:
+                this_limit = min(page_size, target_fetch - len(markets_raw))
+                async with session.get(
+                    f"{config.GAMMA_API}/markets",
+                    params={
+                        "active": "true",
+                        "closed": "false",
+                        "tag_slug": "bitcoin",
+                        "limit": this_limit,
+                        "offset": offset,
+                        "_order": "volume",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as r:
+                    page = await r.json()
+                if not isinstance(page, list) or not page:
+                    break
+                markets_raw.extend(page)
+                if len(page) < this_limit:
+                    break
+                offset += len(page)
+        except Exception as e:
+            log.error(f"Gamma API fallback error: {e}")
+            return []
 
     results = []
     skipped_unsupported = 0
@@ -705,10 +770,14 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
             continue
         if not m.get("active"):
             continue
+        if bool(m.get("closed")):
+            continue
         rules_text = " ".join(
             str(m.get(k, "") or "")
             for k in ("description", "rules", "resolutionSource", "resolution")
         )
+        if m.get("_event_title"):
+            rules_text = f"{rules_text} {m.get('_event_title', '')}".strip()
         model_type = classify_market_model(m.get("question", ""), rules_text)
         if model_type == "unsupported":
             skipped_unsupported += 1
@@ -785,7 +854,10 @@ async def get_btc_markets(session: aiohttp.ClientSession) -> list[Market]:
         results.append(Market(
             condition_id=m.get("conditionId", m.get("id", "")),
             slug=m.get("slug", ""),
-            event_slug=(m.get("events")[0].get("slug", "") if isinstance(m.get("events"), list) and m.get("events") else ""),
+            event_slug=(
+                str(m.get("_event_slug", ""))
+                or (m.get("events")[0].get("slug", "") if isinstance(m.get("events"), list) and m.get("events") else "")
+            ),
             question=m.get("question", ""),
             yes_token=yes_token,
             no_token=no_token,
@@ -911,6 +983,10 @@ def classify_market_model(question: str, rules_text: str = "") -> str:
     rules = (rules_text or "").strip().lower()
     if not q:
         return "unsupported"
+
+    # Up/Down binary intraday-style markets usually do not expose explicit strike.
+    if "up or down" in q and ("bitcoin" in q or "btc" in q):
+        return "up_down_binary"
 
     strike = extract_strike_from_question(question, rules_text)
     if strike is None:
@@ -1093,13 +1169,19 @@ async def compute_quote(session: aiohttp.ClientSession, market: Market) -> Optio
     if model == "unsupported":
         return None
 
-    strike = extract_strike_from_question(market.question, market.rules_text)
-    if strike is None:
-        log.debug(f"Could not parse strike from: {market.question}")
-        return None
-
     dte = get_days_to_expiry(market.end_date_iso)
-    if model == "range_terminal":
+    if model == "up_down_binary":
+        # No explicit strike; neutral fair assumption for directional binary.
+        fair = 0.5
+    else:
+        strike = extract_strike_from_question(market.question, market.rules_text)
+        if strike is None:
+            log.debug(f"Could not parse strike from: {market.question}")
+            return None
+
+    if model == "up_down_binary":
+        fair = 0.5
+    elif model == "range_terminal":
         range_bounds = extract_price_range(market.question, market.rules_text)
         if not range_bounds:
             return None
@@ -1558,7 +1640,7 @@ async def place_order(
     edge: float = 0.0,
     mid: Optional[float] = None,
 ) -> Optional[tuple[str, str]]:
-    """Place a limit order via the Polymarket CLOB (py-clob-client)."""
+    """Place a limit order via CLOB (live) or simulate an immediate fill (paper)."""
     notional_usdc = float(size)
     size_shares = notional_to_shares(notional_usdc, price)
     if size_shares < config.MIN_ORDER_SHARES:
@@ -1566,6 +1648,29 @@ async def place_order(
             f"Skip tiny order size_shares={size_shares:.6f} below minimum {config.MIN_ORDER_SHARES:.6f}"
         )
         return None
+
+    if not is_live_mode():
+        paper_id = f"paper-{uuid.uuid4().hex[:16]}"
+        state.total_trades += 1
+        trade_pnl = ledger_apply_yes_fill(market.condition_id, side, price, size_shares)
+        state.realized_pnl += trade_pnl
+        persist_trade(
+            market=market,
+            mode="paper",
+            side=side,
+            price=price,
+            notional_usdc=notional_usdc,
+            size_shares=size_shares,
+            order_id=paper_id,
+            status="filled",
+            pnl=trade_pnl,
+            fill_price=price,
+        )
+        log.info(
+            f"[PAPER] {side} ${notional_usdc:.2f} ({size_shares:.4f} shares) "
+            f"@ {price:.3f} order_id={paper_id[:16]} pnl={trade_pnl:+.4f}"
+        )
+        return (paper_id, "filled")
 
     try:
         from py_clob_client.clob_types import OrderArgs
@@ -1720,12 +1825,15 @@ async def main_loop():
     log.info("  Polymarket Market Making Bot  |  Starting up...")
     log.info("=" * 60)
     validate_runtime_config()
-    log.info("Runtime OK: POLY_ENABLE_LIVE_TRADING and CLOB credentials validated.")
+    if is_live_mode():
+        log.info("Runtime OK: live mode enabled and CLOB credentials validated.")
+    else:
+        log.info("Runtime OK: paper mode enabled (no live CLOB posting).")
     state.starting_balance = 0.0
     refresh_account_state()
     log.info(
         f"Config: profile={config.STRATEGY_PROFILE} spread={config.SPREAD_PCT*100:.1f}%  min_edge={config.MIN_EDGE*100:.1f}%  "
-        f"notional=${config.ORDER_SIZE} CLOB=live"
+        f"notional=${config.ORDER_SIZE} CLOB={'live' if is_live_mode() else 'paper'}"
     )
 
     ws_feed = BinanceBtcWsFeed()
@@ -1776,34 +1884,36 @@ async def main_loop():
                         order_distance_count=0,
                     )
                 else:
-                    sync_pre = sync_live_trades_with_exchange()
-                    if config.CANCEL_BEFORE_REQUOTE:
-                        cancelled = cancel_live_orders_best_effort()
-                        if cancelled:
-                            log.info(f"Cancelled {cancelled} stale live orders before re-quote")
-                    sync_st = sync_live_trades_with_exchange()
-                    merged = {
-                        "filled": sync_pre.get("filled", 0) + sync_st.get("filled", 0),
-                        "fill_ticks": sync_pre.get("fill_ticks", 0) + sync_st.get("fill_ticks", 0),
-                        "cancelled": sync_pre.get("cancelled", 0) + sync_st.get("cancelled", 0),
-                        "skipped": sync_st.get("skipped", 0),
-                    }
-                    if merged.get("filled") or merged.get("cancelled") or merged.get("fill_ticks"):
-                        log.info(
-                            f"[LIVE] exchange sync: orders_filled={merged['filled']} "
-                            f"fill_ticks={merged.get('fill_ticks', 0)} "
-                            f"cancelled={merged['cancelled']} "
-                            f"resting_skipped={merged.get('skipped', 0)}"
-                        )
-                    fills += merged.get("fill_ticks", 0)
+                    if is_live_mode():
+                        sync_pre = sync_live_trades_with_exchange()
+                        if config.CANCEL_BEFORE_REQUOTE:
+                            cancelled = cancel_live_orders_best_effort()
+                            if cancelled:
+                                log.info(f"Cancelled {cancelled} stale live orders before re-quote")
+                        sync_st = sync_live_trades_with_exchange()
+                        merged = {
+                            "filled": sync_pre.get("filled", 0) + sync_st.get("filled", 0),
+                            "fill_ticks": sync_pre.get("fill_ticks", 0) + sync_st.get("fill_ticks", 0),
+                            "cancelled": sync_pre.get("cancelled", 0) + sync_st.get("cancelled", 0),
+                            "skipped": sync_st.get("skipped", 0),
+                        }
+                        if merged.get("filled") or merged.get("cancelled") or merged.get("fill_ticks"):
+                            log.info(
+                                f"[LIVE] exchange sync: orders_filled={merged['filled']} "
+                                f"fill_ticks={merged.get('fill_ticks', 0)} "
+                                f"cancelled={merged['cancelled']} "
+                                f"resting_skipped={merged.get('skipped', 0)}"
+                            )
+                        fills += merged.get("fill_ticks", 0)
                     open_order_cap_blocked = False
-                    n_open = count_live_open_orders()
-                    if n_open >= config.MAX_OPEN_ORDERS:
-                        log.warning(
-                            f"Open orders {n_open} >= POLY_MAX_OPEN_ORDERS ({config.MAX_OPEN_ORDERS}) "
-                            "— skipping new placements this cycle"
-                        )
-                        open_order_cap_blocked = True
+                    if is_live_mode():
+                        n_open = count_live_open_orders()
+                        if n_open >= config.MAX_OPEN_ORDERS:
+                            log.warning(
+                                f"Open orders {n_open} >= POLY_MAX_OPEN_ORDERS ({config.MAX_OPEN_ORDERS}) "
+                                "— skipping new placements this cycle"
+                            )
+                            open_order_cap_blocked = True
                     # 4. Quote each market
                     for market in markets:
                         quote = await compute_quote(session, market)
@@ -1984,7 +2094,7 @@ def update_runtime_state():
             utcnow(),
             int(state.running),
             int(state.kill_switch),
-            0,
+            int(not is_live_mode()),
             state.btc_price,
             btc_source,
             int(state.ws_connected),

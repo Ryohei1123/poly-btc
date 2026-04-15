@@ -26,15 +26,16 @@ pip install -r requirements.txt
 export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/polybot
 ```
 
-### 3. Configure live trading
+### 3. Configure bot mode (paper first, then live)
 ```bash
 cp envs/live-template.env .env
 ```
 
 Edit `.env`:
 - `DATABASE_URL`
-- `POLY_ENABLE_LIVE_TRADING=1`
-- `POLY_PRIVATE_KEY`, `POLY_API_KEY`, `POLY_API_SECRET`, `POLY_PASSPHRASE`
+- `POLY_ENABLE_LIVE_TRADING=0` for paper mode (recommended first)
+- Switch to `POLY_ENABLE_LIVE_TRADING=1` for real CLOB orders
+- Live mode credentials: `POLY_PRIVATE_KEY`, `POLY_API_KEY`, `POLY_API_SECRET`, `POLY_PASSPHRASE`
 
 CLOB docs: https://docs.polymarket.com/developers/CLOB/authentication
 
@@ -44,7 +45,7 @@ pip install py-clob-client
 
 ### 4. Run the bot and dashboard
 ```bash
-# Terminal 1 — bot (requires POLY_ENABLE_LIVE_TRADING=1 and credentials)
+# Terminal 1 — bot (paper if POLY_ENABLE_LIVE_TRADING=0, live if =1)
 python market_maker.py
 
 # Terminal 2 — dashboard
@@ -115,7 +116,8 @@ Edit `market_maker.py` → `Config` class:
 
 Runtime env vars:
 - `DATABASE_URL=postgresql://...` sets PostgreSQL connection
-- `POLY_ENABLE_LIVE_TRADING=1` is **required** for `market_maker.py` to start (real CLOB orders)
+- `POLY_ENABLE_LIVE_TRADING=0` runs paper mode (no real CLOB posting)
+- `POLY_ENABLE_LIVE_TRADING=1` enables real CLOB posting (requires credentials)
 - `POLY_STRATEGY_PROFILE=conservative|balanced|target_clone|aggressive` applies preset defaults for major strategy/risk knobs (explicit per-key env vars always override)
   - `target_clone` is tuned for broad BTC market-maker coverage (faster cycle, wider market set, moderate spread/edge)
 - `POLY_SPREAD_PCT` quote spread width (e.g. `0.04` = 4%)
@@ -190,7 +192,7 @@ sudo apt-get update && sudo apt-get install -y tmux
 cd /root/works/poly-btc
 pip install -r requirements.txt
 
-# Bot session (ensure .env has POLY_ENABLE_LIVE_TRADING=1 and CLOB keys)
+# Bot session (paper mode with `POLY_ENABLE_LIVE_TRADING=0` is safest first)
 tmux new -d -s polybot 'python market_maker.py'
 
 # Dashboard session
@@ -209,6 +211,21 @@ Before sizing up, verify:
 - stable quote/ack/fill telemetry
 - inventory does not stay one-sided for long periods
 - drawdown stays within your risk limits
+
+### Daily metrics export (paper/live review)
+
+Append one evaluation row (24h stats) to `data/daily_metrics.csv`:
+
+```bash
+python scripts/append_daily_metrics.py
+```
+
+Suggested cadence: run this once per day for 1-2 weeks, then compare trends in:
+- `realized_pnl_24h_usd`
+- `win_rate_24h_pct`
+- `ack_rate_avg_pct` / `fill_rate_avg_pct`
+- `cycle_latency_avg_ms`
+- `errors_snapshot`
 
 ---
 
