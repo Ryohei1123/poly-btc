@@ -439,7 +439,6 @@
   <div class="controls">
     <button class="btn btn-green" onclick="refreshAll()">⟳ Refresh</button>
     <button class="btn btn-gray" onclick="toggleAutoRefresh()">⏱ Auto-refresh: <span id="auto-label">ON</span></button>
-    <button class="btn btn-red" onclick="alert('Actual market data only mode is enabled.')">🛑 Data-Only Mode</button>
     <div style="margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--text3);display:flex;align-items:center;gap:6px;">
       Mode: <span style="color:var(--green);font-weight:600" id="mode-label">LIVE MARKET DATA</span>
       &nbsp;|&nbsp; Polymarket + Binance
@@ -831,7 +830,6 @@ async function loadStatus() {
 
   const feedOk = !!d.healthy;
   const botOn = !!d.bot_connected;
-  const paper = !!d.paper_mode;
   const halted = !!d.kill_switch;
   const envLive = !!d.env_ready_for_live_orders;
 
@@ -843,14 +841,11 @@ async function loadStatus() {
     modeLabel.style.color = 'var(--red)';
   } else if (!botOn) {
     modeLabel.textContent = envLive
-      ? 'Market data live · start market_maker.py to run CLOB orders (live .env)'
-      : 'Market data live · bot offline or stale (paper simulation when running)';
+      ? 'Market data live · start market_maker.py to connect the bot'
+      : 'Set POLY_ENABLE_LIVE_TRADING=1 and CLOB credentials in server .env';
     modeLabel.style.color = envLive ? 'var(--yellow)' : 'var(--text3)';
-  } else if (paper) {
-    modeLabel.textContent = 'PAPER trading (simulated fills) · Polymarket + Binance';
-    modeLabel.style.color = 'var(--yellow)';
   } else {
-    modeLabel.textContent = 'LIVE CLOB orders · real capital at risk · Polymarket + Binance';
+    modeLabel.textContent = 'Live CLOB · real capital at risk · Polymarket + Binance';
     modeLabel.style.color = 'var(--red)';
   }
 
@@ -860,8 +855,6 @@ async function loadStatus() {
     applyPillTheme(statusPill, dot, statusText, 'DATA ISSUE', 'yellow');
   } else if (!botOn) {
     applyPillTheme(statusPill, dot, statusText, 'NO BOT', 'yellow');
-  } else if (paper) {
-    applyPillTheme(statusPill, dot, statusText, 'PAPER', 'yellow');
   } else {
     applyPillTheme(statusPill, dot, statusText, 'LIVE $', 'red');
   }

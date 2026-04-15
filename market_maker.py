@@ -15,7 +15,6 @@ import logging
 import os
 import time
 import math
-import random
 import statistics
 import re
 from datetime import datetime, timezone
@@ -169,10 +168,6 @@ class Config:
     MARKETS_WATCHED: int = field(default_factory=lambda: env_int_profile("POLY_MARKETS_WATCHED", 10))     # How many BTC markets to watch
     MARKETS_FETCH_LIMIT: int = field(default_factory=lambda: env_int_profile("POLY_MARKETS_FETCH_LIMIT", 1000)) # Raw market fetch size before filtering
     MIN_MARKET_LIQUIDITY: float = field(default_factory=lambda: env_float_profile("POLY_MIN_MARKET_LIQUIDITY", 1000.0)) # Minimum market liquidity to quote
-    PAPER_FILL_BASE: float = 0.20  # Base fill probability in paper mode
-    PAPER_INITIAL_BALANCE: float = field(default_factory=lambda: env_float("POLY_PAPER_INITIAL_BALANCE", 500.0))  # Paper account starting balance (USDC)
-    FORCE_PAPER: bool = field(default_factory=lambda: env_bool("POLY_FORCE_PAPER", True))
-    EXECUTION_MODE: str = field(default_factory=lambda: os.getenv("POLY_EXECUTION_MODE", "paper").strip().lower())
     ENABLE_LIVE_TRADING: bool = field(default_factory=lambda: env_bool("POLY_ENABLE_LIVE_TRADING", False))
     MIN_ORDER_SHARES: float = field(default_factory=lambda: env_float("POLY_MIN_ORDER_SHARES", 5.0))
     MAX_ORDERS_PER_CYCLE: int = field(default_factory=lambda: env_int_profile("POLY_MAX_ORDERS_PER_CYCLE", 20))
@@ -207,32 +202,23 @@ class Config:
 config = Config()
 live_client = None
 
-def is_live_mode() -> bool:
-    mode = config.EXECUTION_MODE
-    if mode not in {"paper", "live"}:
-        mode = "paper"
-    if config.FORCE_PAPER:
-        return False
-    return mode == "live"
-
 def validate_runtime_config():
-    if is_live_mode() and not config.ENABLE_LIVE_TRADING:
+    """This codebase runs CLOB orders only; paper simulation has been removed."""
+    if not config.ENABLE_LIVE_TRADING:
         raise RuntimeError(
-            "Live mode requested but POLY_ENABLE_LIVE_TRADING is not enabled. "
-            "Set POLY_ENABLE_LIVE_TRADING=1 to allow real order placement."
+            "POLY_ENABLE_LIVE_TRADING=1 is required. This bot places real Polymarket CLOB orders."
         )
-    if is_live_mode():
-        missing = []
-        for env_name, value in {
-            "POLY_PRIVATE_KEY": config.PRIVATE_KEY,
-            "POLY_API_KEY": config.API_KEY,
-            "POLY_API_SECRET": config.API_SECRET,
-            "POLY_PASSPHRASE": config.API_PASSPHRASE,
-        }.items():
-            if not value:
-                missing.append(env_name)
-        if missing:
-            raise RuntimeError(f"Missing required live trading credentials: {', '.join(missing)}")
+    missing = []
+    for env_name, value in {
+        "POLY_PRIVATE_KEY": config.PRIVATE_KEY,
+        "POLY_API_KEY": config.API_KEY,
+        "POLY_API_SECRET": config.API_SECRET,
+        "POLY_PASSPHRASE": config.API_PASSPHRASE,
+    }.items():
+        if not value:
+            missing.append(env_name)
+    if missing:
+        raise RuntimeError(f"Missing required CLOB credentials: {', '.join(missing)}")
 
 def notional_to_shares(notional_usdc: float, price: float) -> float:
     if notional_usdc <= 0:
@@ -369,10 +355,9 @@ class BotState:
     last_cycle: str = ""
     kill_switch: bool = False
     errors: list = field(default_factory=list)
-    paper_mode: bool = True
-    starting_balance: float = config.PAPER_INITIAL_BALANCE
-    current_balance: float = config.PAPER_INITIAL_BALANCE
-    equity: float = config.PAPER_INITIAL_BALANCE
+    starting_balance: float = 0.0
+    current_balance: float = 0.0
+    equity: float = 0.0
     ws_btc_price: float = 0.0
     ws_connected: bool = False
     ws_last_tick: float = 0.0
@@ -475,11 +460,9 @@ def get_market_position_qty(market_id: str) -> float:
     return float(pos.get("qty", 0.0))
 
 def refresh_account_state():
-    """Refresh balance/equity fields for paper-mode accounting."""
-    if state.paper_mode:
-        state.current_balance = round(state.starting_balance + state.realized_pnl, 4)
-        # For now, equity mirrors realized balance until mark-to-market is added.
-        state.equity = state.current_balance
+    """Equity from realized PnL ledger (starting reference balance + cumulative realized)."""
+    state.current_balance = round(state.starting_balance + state.realized_pnl, 4)
+    state.equity = state.current_balance
 
 def update_cycle_telemetry(orders_placed: int, cycle_started: float) -> None:
     """Track instantaneous and 10-cycle average telemetry."""
@@ -1174,7 +1157,7 @@ def persist_trade(
     pnl: float = 0.0,
     fill_price: Optional[float] = None,
 ) -> None:
-    """Persist a trade event with a consistent schema across modes."""
+    """Persist a CLOB trade row to PostgreSQL."""
     db_write(
         SQL_INSERT_TRADE,
         (
@@ -1199,7 +1182,7 @@ def persist_trade(
 
 def ledger_apply_yes_fill(market_id: str, fill_side: str, fill_price: float, shares: float) -> float:
     """
-    Inventory accounting on YES shares (same rules as paper fills).
+    Inventory accounting on YES shares (live partial fills).
     shares = conditional token size filled.
     """
     qty = shares
@@ -1353,8 +1336,6 @@ def sync_live_trades_with_exchange() -> Dict[str, int]:
     then terminal status (filled / cancelled).
     """
     stats: Dict[str, int] = {"filled": 0, "cancelled": 0, "skipped": 0, "fill_ticks": 0}
-    if not is_live_mode():
-        return stats
     try:
         client = get_live_client()
         open_list = client.get_orders() or []
@@ -1474,20 +1455,8 @@ async def place_order(
     edge: float = 0.0,
     mid: Optional[float] = None,
 ) -> Optional[tuple[str, str]]:
-    """
-    Place a limit order via the CLOB API.
-    Requires POLY_PRIVATE_KEY, POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE
-    to be set in environment variables.
-
-    In PAPER TRADING mode (no keys set), this simulates order placement.
-    """
-    paper_mode = not is_live_mode()
-    state.paper_mode = paper_mode
-
-    order_id = f"sim_{int(time.time()*1000)}_{side[:1]}"
+    """Place a limit order via the Polymarket CLOB (py-clob-client)."""
     notional_usdc = float(size)
-    # Shares must always be derived from the order price so notional, shares,
-    # and displayed cents remain arithmetically consistent in logs/UI.
     size_shares = notional_to_shares(notional_usdc, price)
     if size_shares < config.MIN_ORDER_SHARES:
         log.debug(
@@ -1495,54 +1464,6 @@ async def place_order(
         )
         return None
 
-    def clamp(v: float, lo: float, hi: float) -> float:
-        return max(lo, min(hi, v))
-
-    if paper_mode:
-        ref_mid = mid if mid is not None else market.yes_price
-        # Paper fills should be strongly tied to proximity to current midpoint.
-        # This avoids unrealistic fills far from market (e.g., 4c when mid is ~49c).
-        distance_to_mid = abs(price - ref_mid)
-        marketable = (
-            (side == "BUY" and price >= ref_mid) or
-            (side == "SELL" and price <= ref_mid)
-        )
-        proximity = math.exp(-distance_to_mid * 18.0)
-        fill_prob = 0.02 + 0.35 * proximity
-        if marketable:
-            fill_prob = max(fill_prob, 0.75)
-        fill_prob = clamp(fill_prob, 0.01, 0.90)
-        is_filled = random.random() < fill_prob
-
-        status = "filled" if is_filled else "cancelled"
-        fill_price = price if is_filled else None
-        trade_pnl = 0.0
-        if is_filled:
-            trade_pnl = ledger_apply_yes_fill(market.condition_id, side, price, size_shares)
-            state.realized_pnl += trade_pnl
-            refresh_account_state()
-
-        log.info(
-            f"[PAPER] {side} ${notional_usdc:.2f} ({size_shares:.4f} shares) "
-            f"{market.question[:40]}... @ {price:.3f} status={status} fill_prob={fill_prob:.2f} pnl={trade_pnl:+.2f}"
-        )
-        state.total_trades += 1
-        persist_trade(
-            market=market,
-            mode="paper",
-            side=side,
-            price=price,
-            notional_usdc=notional_usdc,
-            size_shares=size_shares,
-            order_id=order_id,
-            status=status,
-            pnl=trade_pnl,
-            fill_price=fill_price,
-        )
-        return (order_id, status)
-
-    # --- Live trading via py-clob-client ---
-    # Install: pip install py-clob-client
     try:
         from py_clob_client.clob_types import OrderArgs, OrderType
         client = get_live_client()
@@ -1555,7 +1476,7 @@ async def place_order(
             order_type=OrderType.GTC,
         )
         resp = client.create_and_post_order(order_args)
-        real_id = resp.get("orderID", order_id)
+        real_id = resp.get("orderID") or ""
 
         state.total_trades += 1
         persist_trade(
@@ -1570,14 +1491,13 @@ async def place_order(
         )
         log.info(
             f"[LIVE] {side} ${notional_usdc:.2f} ({size_shares:.4f} shares) "
-            f"@ {price:.3f} order_id={real_id[:16]}"
+            f"@ {price:.3f} order_id={real_id[:16] if real_id else '?'}"
         )
         return (real_id, "open")
 
     except ImportError:
-        log.critical("py-clob-client not installed. Live trading cannot run.")
-        if is_live_mode():
-            state.kill_switch = True
+        log.critical("py-clob-client not installed. Install with: pip install py-clob-client")
+        state.kill_switch = True
         return None
     except Exception as e:
         log.error(f"Order placement failed: {e}")
@@ -1591,8 +1511,6 @@ def count_live_open_orders() -> int:
     Resting live orders for MAX_OPEN_ORDERS enforcement.
     Prefer CLOB get_orders(); fall back to DB if the client call fails.
     """
-    if not is_live_mode():
-        return 0
     try:
         client = get_live_client()
         orders = client.get_orders()
@@ -1615,8 +1533,6 @@ def cancel_live_orders_best_effort() -> int:
     Try to cancel stale live orders before re-quoting.
     Uses whichever client methods are available in installed py-clob-client version.
     """
-    if not is_live_mode():
-        return 0
     try:
         client = get_live_client()
 
@@ -1685,13 +1601,11 @@ async def main_loop():
     log.info("  Polymarket Market Making Bot  |  Starting up...")
     log.info("=" * 60)
     validate_runtime_config()
-    state.paper_mode = not is_live_mode()
-    state.starting_balance = config.PAPER_INITIAL_BALANCE
+    state.starting_balance = 0.0
     refresh_account_state()
     log.info(
         f"Config: profile={config.STRATEGY_PROFILE} spread={config.SPREAD_PCT*100:.1f}%  min_edge={config.MIN_EDGE*100:.1f}%  "
-        f"notional=${config.ORDER_SIZE} mode={'paper' if state.paper_mode else 'live'} "
-        f"starting_balance=${state.starting_balance:.2f}"
+        f"notional=${config.ORDER_SIZE} CLOB=live"
     )
 
     ws_feed = BinanceBtcWsFeed()
@@ -1742,37 +1656,34 @@ async def main_loop():
                         order_distance_count=0,
                     )
                 else:
-                    if is_live_mode():
-                        sync_pre = sync_live_trades_with_exchange()
-                    if is_live_mode() and config.CANCEL_BEFORE_REQUOTE:
+                    sync_pre = sync_live_trades_with_exchange()
+                    if config.CANCEL_BEFORE_REQUOTE:
                         cancelled = cancel_live_orders_best_effort()
                         if cancelled:
                             log.info(f"Cancelled {cancelled} stale live orders before re-quote")
-                    if is_live_mode():
-                        sync_st = sync_live_trades_with_exchange()
-                        merged = {
-                            "filled": sync_pre.get("filled", 0) + sync_st.get("filled", 0),
-                            "fill_ticks": sync_pre.get("fill_ticks", 0) + sync_st.get("fill_ticks", 0),
-                            "cancelled": sync_pre.get("cancelled", 0) + sync_st.get("cancelled", 0),
-                            "skipped": sync_st.get("skipped", 0),
-                        }
-                        if merged.get("filled") or merged.get("cancelled") or merged.get("fill_ticks"):
-                            log.info(
-                                f"[LIVE] exchange sync: orders_filled={merged['filled']} "
-                                f"fill_ticks={merged.get('fill_ticks', 0)} "
-                                f"cancelled={merged['cancelled']} "
-                                f"resting_skipped={merged.get('skipped', 0)}"
-                            )
-                        fills += merged.get("fill_ticks", 0)
+                    sync_st = sync_live_trades_with_exchange()
+                    merged = {
+                        "filled": sync_pre.get("filled", 0) + sync_st.get("filled", 0),
+                        "fill_ticks": sync_pre.get("fill_ticks", 0) + sync_st.get("fill_ticks", 0),
+                        "cancelled": sync_pre.get("cancelled", 0) + sync_st.get("cancelled", 0),
+                        "skipped": sync_st.get("skipped", 0),
+                    }
+                    if merged.get("filled") or merged.get("cancelled") or merged.get("fill_ticks"):
+                        log.info(
+                            f"[LIVE] exchange sync: orders_filled={merged['filled']} "
+                            f"fill_ticks={merged.get('fill_ticks', 0)} "
+                            f"cancelled={merged['cancelled']} "
+                            f"resting_skipped={merged.get('skipped', 0)}"
+                        )
+                    fills += merged.get("fill_ticks", 0)
                     open_order_cap_blocked = False
-                    if is_live_mode():
-                        n_open = count_live_open_orders()
-                        if n_open >= config.MAX_OPEN_ORDERS:
-                            log.warning(
-                                f"Open orders {n_open} >= POLY_MAX_OPEN_ORDERS ({config.MAX_OPEN_ORDERS}) "
-                                "— skipping new placements this cycle"
-                            )
-                            open_order_cap_blocked = True
+                    n_open = count_live_open_orders()
+                    if n_open >= config.MAX_OPEN_ORDERS:
+                        log.warning(
+                            f"Open orders {n_open} >= POLY_MAX_OPEN_ORDERS ({config.MAX_OPEN_ORDERS}) "
+                            "— skipping new placements this cycle"
+                        )
+                        open_order_cap_blocked = True
                     # 4. Quote each market
                     for market in markets:
                         quote = await compute_quote(session, market)
@@ -1824,16 +1735,6 @@ async def main_loop():
                                 )
                                 continue
 
-                            if state.paper_mode:
-                                exposure = get_total_exposure()
-                                sides_to_place = int(allow_buy) + int(allow_sell)
-                                projected = exposure + (sides_to_place * config.ORDER_SIZE)
-                                if projected > state.equity:
-                                    log.warning(
-                                        f"Paper balance guard: projected exposure ${projected:.2f} > equity ${state.equity:.2f}. "
-                                        "Skipping new quote."
-                                    )
-                                    continue
                             market_exposure = get_market_exposure(market.condition_id)
                             projected_market = market_exposure + (max(int(allow_buy), int(allow_sell)) * config.ORDER_SIZE)
                             if projected_market > config.MAX_POSITION:
@@ -1908,11 +1809,10 @@ async def main_loop():
                         f"Placed quotes on {placed_count} markets this cycle "
                         f"(buy_orders={buy_orders}, sell_orders={sell_orders})"
                     )
-                    if state.paper_mode:
-                        log.info(
-                            f"Paper account: start=${state.starting_balance:.2f} "
-                            f"equity=${state.equity:.2f} realized={state.realized_pnl:+.2f} exposure=${get_total_exposure():.2f}"
-                        )
+                    log.info(
+                        f"Account: equity=${state.equity:.2f} realized={state.realized_pnl:+.2f} "
+                        f"exposure=${get_total_exposure():.2f}"
+                    )
 
                 update_cycle_telemetry(placed_count, cycle_started)
                 log.info(
@@ -1964,7 +1864,7 @@ def update_runtime_state():
             utcnow(),
             int(state.running),
             int(state.kill_switch),
-            int(state.paper_mode),
+            0,
             state.btc_price,
             btc_source,
             int(state.ws_connected),

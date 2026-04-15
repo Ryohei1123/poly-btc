@@ -13,7 +13,7 @@ SCHEMA_STATEMENTS = [
     )""",
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS market_slug TEXT",
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS event_slug TEXT",
-    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS mode TEXT DEFAULT 'paper'",
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS mode TEXT DEFAULT 'live'",
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS notional_usdc REAL",
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS size_shares REAL",
     """CREATE TABLE IF NOT EXISTS quotes (
@@ -34,7 +34,7 @@ SCHEMA_STATEMENTS = [
         updated_at TIMESTAMPTZ NOT NULL,
         running INTEGER DEFAULT 1,
         kill_switch INTEGER DEFAULT 0,
-        paper_mode INTEGER DEFAULT 1,
+        paper_mode INTEGER DEFAULT 0,
         btc_price REAL DEFAULT 0,
         btc_source TEXT DEFAULT 'ref',
         ws_connected INTEGER DEFAULT 0,
@@ -68,6 +68,7 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS fill_rate_avg REAL DEFAULT 0",
     "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS avg_edge_avg REAL DEFAULT 0",
     "ALTER TABLE runtime_state ADD COLUMN IF NOT EXISTS avg_order_distance_avg REAL DEFAULT 0",
+    "ALTER TABLE runtime_state ALTER COLUMN paper_mode SET DEFAULT 0",
     # Historical fix: normalize share count to notional/price when legacy rows were
     # written with midpoint-derived shares (causes impossible UI values).
     """UPDATE trades

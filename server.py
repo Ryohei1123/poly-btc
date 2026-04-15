@@ -1,14 +1,14 @@
 """
 Polymarket Bot Dashboard — Backend API
-Hybrid data: Gamma/Binance market snapshots plus PostgreSQL bot tables when active
-(POLY_DASHBOARD_DATA_SOURCE=auto|db|gamma). Run: python server.py — http://localhost:5050
+PostgreSQL bot tables when the market maker is active; Gamma/Binance for market health
+and fallbacks. Run: python server.py — http://localhost:5050
 """
 
 import os
 import json
 import time
 from typing import Optional
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -45,20 +45,13 @@ def _live_credentials_configured() -> bool:
 
 
 def _execution_env_flags() -> dict:
-    force_paper = env_bool("POLY_FORCE_PAPER", True)
-    mode = (os.getenv("POLY_EXECUTION_MODE", "paper") or "paper").strip().lower()
-    if mode not in ("paper", "live"):
-        mode = "paper"
+    """CLOB trading is live-only in this repo; flags reflect whether the server .env is armed."""
     armed = env_bool("POLY_ENABLE_LIVE_TRADING", False)
     creds = _live_credentials_configured()
     return {
-        "execution_mode": mode,
-        "force_paper": force_paper,
         "enable_live_trading": armed,
         "live_credentials_configured": creds,
-        "env_ready_for_live_orders": (
-            (not force_paper) and mode == "live" and armed and creds
-        ),
+        "env_ready_for_live_orders": bool(armed and creds),
     }
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/polybot")
@@ -97,23 +90,6 @@ SQL_SUM_TRADE_VOLUME = "SELECT COALESCE(SUM(COALESCE(notional_usdc, size)), 0) A
 SQL_COUNT_OPEN_ORDERS = "SELECT COUNT(*) AS cnt FROM trades WHERE status IN ('open','submitted')"
 SQL_LATEST_BALANCE = "SELECT balance FROM bot_stats ORDER BY ts DESC LIMIT 1"
 SQL_LATEST_BTC_PRICE = "SELECT price FROM btc_prices ORDER BY ts DESC LIMIT 1"
-SQL_RUNTIME_SUMMARY = """
-SELECT
-    updated_at,
-    running,
-    kill_switch,
-    paper_mode,
-    btc_price,
-    btc_source,
-    ws_connected,
-    ws_tick_age_sec,
-    cycle_latency_ms,
-    orders_placed_cycle,
-    cycle_latency_avg_ms,
-    orders_placed_avg
-FROM runtime_state
-WHERE id=1
-"""
 SQL_ACTIVE_MARKETS_LAST_HOUR = "SELECT COUNT(DISTINCT market_id) AS active_markets FROM quotes WHERE ts >= %s"
 SQL_DAILY_PNL = "SELECT COALESCE(SUM(pnl), 0) AS pnl FROM trades WHERE ts >= %s AND status='filled'"
 SQL_COUNT_WIN_TRADES = "SELECT COUNT(*) AS cnt FROM trades WHERE pnl > 0 AND status='filled'"
@@ -170,77 +146,11 @@ def close_db(_exc):
         con.close()
 
 def ensure_db():
-    """Create DB schema. Demo data is optional via POLYBOT_SEED_DEMO=1."""
+    """Create DB schema (no synthetic seed data)."""
     con = psycopg.connect(DATABASE_URL, row_factory=dict_row)
     apply_schema(con)
-
-    # Seed demo data only when explicitly requested.
-    count = con.execute("SELECT COUNT(*) AS cnt FROM trades").fetchone()["cnt"]
-    if count == 0 and os.getenv("POLYBOT_SEED_DEMO", "0") == "1":
-        _seed_demo_data(con)
     con.commit()
     con.close()
-
-def _seed_demo_data(con):
-    """Insert realistic demo data so the dashboard renders on first launch."""
-    import random, math
-    random.seed(42)
-    now = datetime.now(timezone.utc)
-
-    markets = [
-        ("mkt_001", "Will BTC be above $90,000 on April 30, 2026?"),
-        ("mkt_002", "Will BTC be above $95,000 on May 15, 2026?"),
-        ("mkt_003", "Will Bitcoin exceed $100,000 by end of April?"),
-        ("mkt_004", "Will BTC close above $88,000 this week?"),
-        ("mkt_005", "Will Bitcoin drop below $80,000 in April 2026?"),
-    ]
-
-    # 645 demo trades over 30 days
-    total_pnl = 0
-    for i in range(645):
-        ts = (now - timedelta(minutes=i*67)).isoformat()
-        mid, mq = random.choice(markets)
-        side = random.choice(["BUY", "SELL"])
-        price = round(random.uniform(0.35, 0.72), 3)
-        size = round(random.uniform(30, 120), 2)
-        pnl = round(random.gauss(0.8, 1.2), 2)  # Positive edge mean
-        total_pnl += pnl
-        con.execute(
-            "INSERT INTO trades (ts,market_id,market_slug,event_slug,market_q,side,price,size,order_id,status,pnl,fill_price) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (ts, mid, "", "", mq, side, price, size, f"ord_{i:04d}", "filled", pnl, round(price + 0.005 * (1 if side=="BUY" else -1), 3)),
-        )
-
-    # BTC prices last 24hrs
-    for j in range(288):  # 5-min intervals
-        ts = (now - timedelta(minutes=j*5)).isoformat()
-        base = 87500
-        price = base + math.sin(j/20)*800 + random.gauss(0, 200)
-        con.execute(
-            "INSERT INTO btc_prices VALUES (%s,%s) ON CONFLICT (ts) DO NOTHING",
-            (ts, round(price, 2)),
-        )
-
-    # Quotes log
-    for k in range(200):
-        ts = (now - timedelta(minutes=k*10)).isoformat()
-        mid_v, mq = random.choice(markets)
-        fair = round(random.uniform(0.40, 0.70), 3)
-        mid = round(fair + random.gauss(0, 0.04), 3)
-        edge = round(abs(fair - mid), 3)
-        con.execute(
-            "INSERT INTO quotes (ts,market_id,bid,ask,fair_price,mid,edge,placed) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-            (ts, mid_v, round(fair-0.02,3), round(fair+0.02,3), fair, mid, edge, int(edge>0.015)),
-        )
-
-    # Bot stats snapshots
-    pnl_acc = 0
-    for h in range(720):  # hourly for 30 days
-        ts = (now - timedelta(hours=h)).isoformat()
-        pnl_acc += random.gauss(380, 80)  # ~$272k over month
-        con.execute(
-            "INSERT INTO bot_stats (ts,total_trades,open_positions,realized_pnl,daily_pnl,active_markets) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (ts) DO NOTHING",
-            (ts, max(0,645-h), random.randint(3,8), round(pnl_acc,2), round(random.gauss(9100,1200),2), random.randint(5,10)),
-        )
 
 def fmt_ts(value):
     if isinstance(value, datetime):
@@ -321,21 +231,6 @@ def _tail_text_file(path: Path, max_lines: int) -> list[str]:
         return lines[-max_lines:]
     except OSError:
         return []
-
-
-def _synthetic_dashboard_log_lines() -> list[str]:
-    markets = get_live_btc_markets()
-    top = markets[0] if markets else None
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    lines = [
-        f"{now} [INFO] LIVE_DATA source=gamma+binance btc_markets={len(markets)}",
-    ]
-    if top:
-        lines.append(
-            f"{now} [INFO] TOP_MARKET yes={top['yes_price']*100:.2f}c "
-            f"no={top['no_price']*100:.2f}c volume=${top['volume']:.0f} q={top['question'][:80]}"
-        )
-    return lines
 
 
 def _dashboard_mode_raw() -> str:
@@ -725,17 +620,15 @@ def status():
     bot_running = False
     bot_stale = True
     kill_switch = False
-    paper_mode = True
     runtime_updated_at = None
     try:
         con = get_db()
         row = con.execute(
-            "SELECT running, kill_switch, paper_mode, updated_at FROM runtime_state WHERE id=1"
+            "SELECT running, kill_switch, updated_at FROM runtime_state WHERE id=1"
         ).fetchone()
         if row:
             bot_running = bool(int(row["running"] or 0))
             kill_switch = bool(int(row["kill_switch"] or 0))
-            paper_mode = bool(int(row["paper_mode"] or 1))
             u = row.get("updated_at")
             if isinstance(u, datetime):
                 if u.tzinfo is None:
@@ -748,16 +641,12 @@ def status():
         bot_running = False
         bot_stale = True
         kill_switch = False
-        paper_mode = True
 
     bot_connected = bot_running and not bot_stale
-    if not bot_connected:
-        paper_mode = True
 
     return jsonify({
         "running": bot_connected,
         "healthy": healthy,
-        "paper_mode": paper_mode,
         "kill_switch": kill_switch,
         "bot_connected": bot_connected,
         "runtime_updated_at": runtime_updated_at,
@@ -940,14 +829,7 @@ def hourly_pnl():
 
 @app.route("/api/logs")
 def get_logs():
-    """
-    Prefer tailing market_maker.py log (poly-btc/logs/bot_YYYYMMDD.log) so live runs
-    are visible on the dashboard. Set POLY_DASHBOARD_SYNTH_LOGS=1 to force the old
-    synthetic Gamma-only stub lines.
-    """
-    if env_bool("POLY_DASHBOARD_SYNTH_LOGS", False):
-        return jsonify({"lines": _synthetic_dashboard_log_lines(), "source": "synthetic"})
-
+    """Tail market_maker.py log (poly-btc/logs/bot_YYYYMMDD.log) when present."""
     try:
         max_lines = int(os.getenv("POLY_DASHBOARD_LOG_LINES", "120") or "120")
     except (TypeError, ValueError):
@@ -960,7 +842,14 @@ def get_logs():
         if tailed:
             return jsonify({"lines": tailed, "source": str(log_path.name)})
 
-    return jsonify({"lines": _synthetic_dashboard_log_lines(), "source": "synthetic"})
+    return jsonify(
+        {
+            "lines": [
+                "No bot log file yet. Start market_maker.py to create poly-btc/logs/bot_YYYYMMDD.log"
+            ],
+            "source": "none",
+        }
+    )
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")

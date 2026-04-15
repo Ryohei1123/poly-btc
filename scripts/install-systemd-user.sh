@@ -17,7 +17,7 @@ fi
 
 if [[ ! -f "${WORKDIR}/.env" ]]; then
   echo "Missing ${WORKDIR}/.env" >&2
-  echo "Create it first, e.g.: cp envs/paper-conservative.env .env" >&2
+  echo "Create it first, e.g.: cp envs/live-template.env .env" >&2
   exit 1
 fi
 

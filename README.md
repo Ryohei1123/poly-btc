@@ -26,44 +26,30 @@ pip install -r requirements.txt
 export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/polybot
 ```
 
-### 3. Pick an environment file
-```bash
-# Balanced paper mode
-cp envs/paper-balanced.env .env
-
-# or lower-risk paper mode
-cp envs/paper-conservative.env .env
-```
-
-### 4. Run in paper trading mode (no keys needed)
-```bash
-# Terminal 1 — start the bot
-python market_maker.py
-
-# Terminal 2 — start the dashboard
-python server.py
-# Open http://localhost:5050
-```
-
-Paper mode defaults:
-- `POLY_FORCE_PAPER=1` (enabled by default)
-- `POLY_PAPER_INITIAL_BALANCE=500` (starting paper equity)
-
-### 5. Configure for live trading
-Use the live template:
+### 3. Configure live trading
 ```bash
 cp envs/live-template.env .env
 ```
 
-Then edit `.env` and set:
+Edit `.env`:
+- `DATABASE_URL`
 - `POLY_ENABLE_LIVE_TRADING=1`
 - `POLY_PRIVATE_KEY`, `POLY_API_KEY`, `POLY_API_SECRET`, `POLY_PASSPHRASE`
 
-Get CLOB credentials from: https://docs.polymarket.com/developers/CLOB/authentication
+CLOB docs: https://docs.polymarket.com/developers/CLOB/authentication
 
-Install the live trading client:
 ```bash
 pip install py-clob-client
+```
+
+### 4. Run the bot and dashboard
+```bash
+# Terminal 1 — bot (requires POLY_ENABLE_LIVE_TRADING=1 and credentials)
+python market_maker.py
+
+# Terminal 2 — dashboard
+python server.py
+# Open http://localhost:5050
 ```
 
 ---
@@ -129,10 +115,7 @@ Edit `market_maker.py` → `Config` class:
 
 Runtime env vars:
 - `DATABASE_URL=postgresql://...` sets PostgreSQL connection
-- `POLY_EXECUTION_MODE=paper|live` chooses execution mode
-- `POLY_FORCE_PAPER=1` forces paper mode even if live mode is configured
-- `POLY_ENABLE_LIVE_TRADING=1` is required for real orders in live mode
-- `POLY_PAPER_INITIAL_BALANCE=500` sets paper account starting balance
+- `POLY_ENABLE_LIVE_TRADING=1` is **required** for `market_maker.py` to start (real CLOB orders)
 - `POLY_STRATEGY_PROFILE=conservative|balanced|target_clone|aggressive` applies preset defaults for major strategy/risk knobs (explicit per-key env vars always override)
   - `target_clone` is tuned for broad BTC market-maker coverage (faster cycle, wider market set, moderate spread/edge)
 - `POLY_SPREAD_PCT` quote spread width (e.g. `0.04` = 4%)
@@ -169,7 +152,7 @@ Runtime env vars:
 
 ```bash
 cd /root/works/poly-btc
-cp envs/paper-conservative.env .env
+cp envs/live-template.env .env
 bash scripts/install-systemd-user.sh
 ```
 
@@ -207,8 +190,8 @@ sudo apt-get update && sudo apt-get install -y tmux
 cd /root/works/poly-btc
 pip install -r requirements.txt
 
-# Bot session
-tmux new -d -s polybot 'export POLY_FORCE_PAPER=1 POLY_PAPER_INITIAL_BALANCE=500; python market_maker.py'
+# Bot session (ensure .env has POLY_ENABLE_LIVE_TRADING=1 and CLOB keys)
+tmux new -d -s polybot 'python market_maker.py'
 
 # Dashboard session
 tmux new -d -s polydash 'python server.py'
@@ -218,9 +201,9 @@ tmux ls
 tmux attach -t polybot
 ```
 
-### 7-day soak test checklist
+### Soak test checklist
 
-Run in paper mode for at least 1 week and verify:
+Before sizing up, verify:
 - no prolonged downtime/restart loops
 - kill switch does not trigger repeatedly
 - stable quote/ack/fill telemetry
@@ -231,7 +214,7 @@ Run in paper mode for at least 1 week and verify:
 
 ## Risk Warnings
 
-1. **Start in paper trading mode** — verify logic before going live
+1. **Start with small `POLY_ORDER_SIZE`** — scale after you trust behavior
 2. **Prediction markets resolve to 0 or 1** — adverse selection risk if your fair price is wrong
 3. **Inventory risk** — if you fill on one side and market moves against you, PnL can be negative
 4. **Expiry risk** — don't hold positions into resolution; bot auto-skips markets within 12h of expiry
