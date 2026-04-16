@@ -387,6 +387,40 @@
     background: rgba(255,77,106,0.12);
     border-color: rgba(255,77,106,0.26);
   }
+  .trade-table.polymarket-style .dir-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    border: 1px solid transparent;
+  }
+  .trade-table.polymarket-style .dir-pill.up {
+    color: var(--blue);
+    background: rgba(77,159,255,0.12);
+    border-color: rgba(77,159,255,0.26);
+  }
+  .trade-table.polymarket-style .dir-pill.down {
+    color: var(--yellow);
+    background: rgba(247,195,85,0.12);
+    border-color: rgba(247,195,85,0.26);
+  }
+  .trade-table.polymarket-style .label-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--purple);
+    background: rgba(167,139,250,0.12);
+    border: 1px solid rgba(167,139,250,0.26);
+  }
 
   /* ─── Market Breakdown ─── */
   .market-item {
@@ -907,6 +941,12 @@ function fmtNum(v, maxFractionDigits = 0) {
   return Number(v || 0).toLocaleString('en', { maximumFractionDigits: maxFractionDigits });
 }
 
+function extractStrikeLabel(marketQuestion) {
+  const q = String(marketQuestion || '');
+  const m = q.match(/(?:\$)?(\d{1,3}(?:,\d{3})+)/);
+  return m ? m[1] : null;
+}
+
 function updateClobWalletPanel(d) {
   const panel = el('clob-wallet-panel');
   const main = el('clob-wallet-main');
@@ -1116,7 +1156,7 @@ function setTradesTableHead(isBot) {
       <col style="width:12%">
     `;
     thead.innerHTML = `<tr>
-      <th>Market</th><th class="num-head">Avg</th><th class="num-head">Current</th><th class="num-head">Value</th><th>URL</th>
+      <th>Market</th><th class="num-head">Shares</th><th class="num-head">Spent</th><th class="num-head">PnL</th><th>URL</th>
     </tr>`;
   } else {
     if (table) table.classList.remove('polymarket-style');
@@ -1142,66 +1182,52 @@ async function loadTrades() {
     return;
   }
   if (isBot) {
-    const grouped = new Map();
-    for (const t of data) {
-      const key = t.market_q || '—';
+    tbody.innerHTML = data.map(t => {
       const shares = Math.abs(Number(t.size_shares || 0));
-      const side = String(t.side || '').toUpperCase();
-      const signedShares = side === 'SELL' ? -shares : shares;
-      const pxC = Number(t.price_cents || 0);
-      const notional = Number(t.volume_usd || 0);
+      const sideRaw = String(t.side || '').toUpperCase();
+      const buyLabel = String(t.display_buy_label || 'YES').trim().toUpperCase();
+      const sellLabel = String(t.display_sell_label || 'NO').trim().toUpperCase();
+      const displayLabel = sideRaw === 'SELL' ? sellLabel : buyLabel;
+      const cents = Number(t.price_cents || 0);
+      const spentUsd = Math.abs(Number(t.volume_usd || 0));
       const pnl = Number(t.pnl || 0);
-      let g = grouped.get(key);
-      if (!g) {
-        g = {
-          market_q: t.market_q || '—',
-          market_url: t.market_url || '',
-          current_c: pxC,
-          avg_num: 0,
-          avg_den: 0,
-          net_shares: 0,
-          pnl: 0,
-          ts: t.ts || '',
-          notional: 0,
-        };
+      const strike = extractStrikeLabel(t.market_q || '');
+      const orderSummary = strike
+        ? `${displayLabel} ${cents.toFixed(1)}c at ${strike}`
+        : `${displayLabel} ${cents.toFixed(1)}c`;
+      let labelHtml = '';
+      if (displayLabel === 'YES') {
+        labelHtml = `<span class="side-pill yes">${displayLabel}</span>`;
+      } else if (displayLabel === 'NO') {
+        labelHtml = `<span class="side-pill no">${displayLabel}</span>`;
+      } else if (displayLabel === 'UP') {
+        labelHtml = `<span class="dir-pill up">${displayLabel}</span>`;
+      } else if (displayLabel === 'DOWN') {
+        labelHtml = `<span class="dir-pill down">${displayLabel}</span>`;
+      } else {
+        labelHtml = `<span class="label-pill">${displayLabel}</span>`;
       }
-      // First row is most recent because API returns DESC.
-      if (!g.current_c && pxC) g.current_c = pxC;
-      g.avg_num += pxC * shares;
-      g.avg_den += shares;
-      g.net_shares += signedShares;
-      g.pnl += pnl;
-      g.notional += notional;
-      grouped.set(key, g);
-    }
-    const rows = [...grouped.values()].map(g => {
-      const avgC = g.avg_den > 0 ? (g.avg_num / g.avg_den) : 0;
-      const currentC = Number(g.current_c || 0);
-      const valueUsd = Math.abs(g.net_shares) * (currentC / 100.0);
-      const sideLabel = g.net_shares >= 0 ? 'Yes' : 'No';
-      const sideClass = g.net_shares >= 0 ? 'yes' : 'no';
-      return { ...g, avgC, currentC, valueUsd, sideLabel, sideClass };
-    });
-    tbody.innerHTML = rows.map(r => `
+      const statusText = String(t.status || '').trim().toUpperCase() || '—';
+      return `
     <tr>
       <td class="market-cell">
-        <div class="market-main" title="${r.market_q}">${r.market_q || '—'}</div>
+        <div class="market-main" title="${t.market_q || ''}">${t.market_q || '—'}</div>
         <div class="market-sub">
-          <span class="side-pill ${r.sideClass}">${r.sideLabel}</span>
-          <span>${r.avgC.toFixed(1)}c avg</span>
-          <span>${fmtNum(Math.abs(r.net_shares), 1)} shares</span>
-          <span>${fmtPnl(r.pnl)} PnL</span>
+          ${labelHtml}
+          <span>${orderSummary}</span>
+          <span>${statusText}</span>
         </div>
       </td>
-      <td class="num-cell">${r.avgC.toFixed(1)}c</td>
-      <td class="num-cell">${r.currentC.toFixed(1)}c</td>
-      <td class="num-cell">$${fmtNum(r.valueUsd, 2)}</td>
+      <td class="num-cell">${fmtNum(shares, 2)}</td>
+      <td class="num-cell">$${fmtNum(spentUsd, 2)}</td>
+      <td class="num-cell" style="color:${pnl >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtPnl(pnl)}</td>
       <td class="url-cell">${
-        r.market_url
-          ? `<a href="${r.market_url}" target="_blank" rel="noopener noreferrer" style="color:var(--green);text-decoration:none">${truncate(r.market_url.replace('https://',''), 44)}</a>`
+        t.market_url
+          ? `<a href="${t.market_url}" target="_blank" rel="noopener noreferrer" style="color:var(--green);text-decoration:none">${truncate(t.market_url.replace('https://',''), 44)}</a>`
           : '<span style="color:var(--text3)">—</span>'
       }</td>
-    </tr>`).join('');
+    </tr>`;
+    }).join('');
     return;
   }
   tbody.innerHTML = data.map(t => `

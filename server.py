@@ -71,6 +71,7 @@ STATIC_DIR = str(DEFAULT_STATIC_DIR if DEFAULT_STATIC_DIR.exists() else Path(__f
 
 app = Flask(__name__, static_folder=STATIC_DIR)
 EVENT_SLUG_CACHE: dict[str, str] = {}
+MARKET_META_CACHE: dict[str, dict] = {}
 GAMMA_API = "https://gamma-api.polymarket.com"
 BINANCE_API = "https://api.binance.com"
 LIVE_CACHE: dict[str, dict[str, object]] = {
@@ -479,6 +480,7 @@ def _recent_trades_from_db(con) -> list[dict]:
         slug = (r.get("market_slug") or "").strip()
         ev = (r.get("event_slug") or "").strip()
         url = market_url_from_slugs(slug, ev)
+        market_meta = _fetch_market_meta_from_gamma(slug)
         notional = r.get("notional_usdc")
         if notional is None:
             notional = r.get("size")
@@ -495,6 +497,9 @@ def _recent_trades_from_db(con) -> list[dict]:
                 "pnl": round(float(r.get("pnl") or 0), 4),
                 "size_shares": float(r.get("size_shares") or 0),
                 "market_url": url,
+                "market_format": market_meta.get("market_format", "unknown"),
+                "display_buy_label": market_meta.get("buy_label", "YES"),
+                "display_sell_label": market_meta.get("sell_label", "NO"),
             }
         )
     return out
@@ -749,6 +754,69 @@ def resolve_event_slug(market_slug: str) -> str:
         pass
     EVENT_SLUG_CACHE[slug] = ""
     return ""
+
+
+def _normalize_outcome_label(label: object) -> str:
+    s = str(label or "").strip()
+    if not s:
+        return ""
+    return " ".join(s.split())
+
+
+def _fetch_market_meta_from_gamma(market_slug: str) -> dict:
+    """
+    Cached outcome metadata for display formatting.
+    buy_label/sell_label map to BUY/SELL trade sides respectively.
+    """
+    slug = (market_slug or "").strip()
+    if not slug:
+        return {
+            "outcomes": [],
+            "buy_label": "YES",
+            "sell_label": "NO",
+            "market_format": "unknown",
+        }
+    cached = MARKET_META_CACHE.get(slug)
+    if cached is not None:
+        return cached
+
+    payload = _fetch_json(f"{GAMMA_API}/markets", params={"slug": slug}, timeout=6)
+    rows = _gamma_market_array(payload)
+    row = rows[0] if rows else {}
+    outcomes_raw = row.get("outcomes") if isinstance(row, dict) else []
+    outcomes = [_normalize_outcome_label(x) for x in _parse_list_field(outcomes_raw)]
+    outcomes = [x for x in outcomes if x]
+    outcomes_l = [x.lower() for x in outcomes]
+
+    buy_label = "YES"
+    sell_label = "NO"
+    market_format = "unknown"
+    if "yes" in outcomes_l and "no" in outcomes_l:
+        yes_i = outcomes_l.index("yes")
+        no_i = outcomes_l.index("no")
+        buy_label = outcomes[yes_i]
+        sell_label = outcomes[no_i]
+        market_format = "yes_no"
+    elif "up" in outcomes_l and "down" in outcomes_l:
+        # Maintain index-0 as BUY leg to align with the bot's default indexing convention.
+        buy_label = outcomes[0]
+        sell_label = outcomes[1] if len(outcomes) > 1 else (
+            "DOWN" if outcomes[0].lower() == "up" else "UP"
+        )
+        market_format = "up_down"
+    elif len(outcomes) >= 2:
+        buy_label = outcomes[0]
+        sell_label = outcomes[1]
+        market_format = "binary_custom"
+
+    meta = {
+        "outcomes": outcomes,
+        "buy_label": buy_label.upper(),
+        "sell_label": sell_label.upper(),
+        "market_format": market_format,
+    }
+    MARKET_META_CACHE[slug] = meta
+    return meta
 
 # ─── API endpoints ─────────────────────────────────────────────────────────────
 
